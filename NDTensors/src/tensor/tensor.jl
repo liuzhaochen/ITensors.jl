@@ -471,7 +471,21 @@ end
 function zero_contraction_output(
         T1::TensorT1, T2::TensorT2, indsR::IndsR
     ) where {TensorT1 <: Tensor, TensorT2 <: Tensor, IndsR}
-    return zeros(contraction_output_type(TensorT1, TensorT2, indsR), indsR)
+    # [FORK] Use buffer allocation when active. Avoids heap allocation
+    # for contraction outputs. Original: `return zeros(contraction_output_type(...), indsR)`.
+    tensortypeR = contraction_output_type(TensorT1, TensorT2, indsR)
+    buf = get_alloc_buffer()
+    if buf !== nothing
+        StT = storagetype(tensortypeR)
+        storage = similar(StT, dim(indsR))
+        _d = data(storage)
+        _z = zero(eltype(storage))
+        for i in eachindex(_d)
+            @inbounds _d[i] = _z
+        end
+        return tensor(storage, indsR)
+    end
+    return zeros(tensortypeR, indsR)
 end
 
 #

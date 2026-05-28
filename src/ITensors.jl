@@ -88,6 +88,8 @@ include("index.jl")
 include("set_operations.jl")
 include("indexset.jl")
 include("itensor.jl")
+# [FORK] Buffer-aware ITensor constructors
+include("itensor_buffer.jl")
 include("qn/flux.jl")
 include("oneitensor.jl")
 include("tensor_operations/contraction_cost.jl")

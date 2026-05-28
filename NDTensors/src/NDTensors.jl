@@ -33,6 +33,8 @@ include("dims.jl")
 include("tensor/set_types.jl")
 include("tensor/similar.jl")
 include("adapt.jl")
+# [FORK] Bumper.jl buffer allocation support
+include("bufferalloc.jl")
 include("tensoroperations/generic_tensor_operations.jl")
 include("tensoroperations/contraction_logic.jl")
 include("abstractarray/tensoralgebra/contract.jl")
@@ -49,7 +51,19 @@ include("dense/set_types.jl")
 include("dense/generic_array_constructors.jl")
 include("linearalgebra/symmetric.jl")
 include("linearalgebra/linearalgebra.jl")
+# [FORK] Buffer-aware Dense constructors
+include("dense/dense_buffer.jl")
+# [FORK] Buffer-aware DenseTensor constructors
+include("dense/densetensor_buffer.jl")
+# [FORK] Buffer-aware similar dispatches (needs Dense defined first)
+include("tensorstorage/tensorstorage_buffer.jl")
+# [FORK] Buffer-aware Tensor constructors (needs Dense defined first)
+include("tensor/tensor_buffer.jl")
+# [FORK] Buffer-aware SVD/QR for UnsafeArray-backed DenseTensors
+include("dense/linearalgebra/decompositions_buffer.jl")
 include("diag/diag.jl")
+# [FORK] Buffer-aware Diag + promote_rule for UniformDiag * Dense{UnsafeArray}
+include("diag/diag_buffer.jl")
 include("diag/set_types.jl")
 include("diag/diagtensor.jl")
 include("diag/similar.jl")

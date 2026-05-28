@@ -127,7 +127,10 @@ end
 function promote_rule(
         ::Type{DenseT1}, ::Type{<:UniformDiag{ElT2, DataT2}}
     ) where {DenseT1 <: Dense, ElT2, DataT2 <: Number}
-    return promote_type(DenseT1, ElT2)
+    #return promote_type(DenseT1, ElT2)  # [FORK] Bug: promotes Dense{Vector} with Float64 → abstract DenseVector
+    # [FORK] Fix: preserve the data type of Dense (Vector, UnsafeArray, etc.)
+    # instead of calling promote_type(Dense, Number) which typejoins to DenseVector.
+    return Dense{promote_type(eltype(DenseT1), ElT2), datatype(DenseT1)}
 end
 
 # Convert a Diag storage type to the closest Dense storage type
