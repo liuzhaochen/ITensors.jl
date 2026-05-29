@@ -90,6 +90,8 @@ include("blocksparse/contract_sequential.jl")
 include("blocksparse/contract_threaded.jl")
 include("blocksparse/diagblocksparse.jl")
 include("blocksparse/similar.jl")
+# [FORK] Buffer-aware BlockSparse storage
+include("blocksparse/blocksparse_buffer.jl")
 include("blocksparse/combiner.jl")
 include("blocksparse/linearalgebra.jl")
 

@@ -48,15 +48,15 @@ function Dense(buf::AllocBuffer, ::UndefInitializer, dim::Integer)
 end
 
 # -----------------------------------------------------------
-# Buffer-aware copy
+# Buffer-aware copy — requires buffer for UnsafeArray
 # -----------------------------------------------------------
 
 """
     copy(D::Dense{ElT, <:UnsafeArray})
 
-Copy buffer-allocated Dense. If a buffer is active in the
-task-local context, the copy lives in the buffer; otherwise
-falls back to heap allocation.
+Copy buffer-allocated Dense. When a buffer is active, the copy lives
+in the buffer; otherwise falls back to heap allocation for extracting
+data out of the buffer arena.
 """
 function copy(D::Dense{ElT, UA}) where {ElT, UA <: UnsafeArray}
     buf = get_alloc_buffer()
@@ -65,76 +65,81 @@ function copy(D::Dense{ElT, UA}) where {ElT, UA <: UnsafeArray}
         copyto!(new_data, data(D))
         return Dense{ElT, typeof(new_data)}(new_data)
     end
-    # Fallback to original behavior
     return Dense(copy(Vector(data(D))))
 end
 
 # -----------------------------------------------------------
-# Buffer-aware element-wise ops
-# conj/real/imag/complex on buffer-allocated Dense fall
-# through to Base.map on raw UnsafeArray, which can't
-# allocate via similar. These Dense-specific methods
-# allocate from the active buffer when available.
+# Buffer-aware element-wise ops — all require buffer for UnsafeArray
 # -----------------------------------------------------------
 
 function conj(::AllowAlias, S::Dense{<:Any, <:UnsafeArray})
     buf = get_alloc_buffer()
-    if buf !== nothing
-        out = Dense{eltype(S)}(buf, length(S))
-        out .= conj.(data(S))
-        return out
+    if buf === nothing
+        error(_NO_BUFFER_MSG)
     end
-    return setdata(S, conj(data(S)))
+    out = Dense{eltype(S)}(buf, length(S))
+    out .= conj.(data(S))
+    return out
 end
 
 function Base.real(S::Dense{<:Any, <:UnsafeArray})
     buf = get_alloc_buffer()
-    if buf !== nothing
-        out = Dense{real(eltype(S))}(buf, length(S))
-        out .= real.(data(S))
-        return out
+    if buf === nothing
+        error(_NO_BUFFER_MSG)
     end
-    return setdata(S, real(data(S)))
+    out = Dense{real(eltype(S))}(buf, length(S))
+    out .= real.(data(S))
+    return out
 end
 
 function Base.imag(S::Dense{<:Any, <:UnsafeArray})
     buf = get_alloc_buffer()
-    if buf !== nothing
-        out = Dense{real(eltype(S))}(buf, length(S))
-        out .= imag.(data(S))
-        return out
+    if buf === nothing
+        error(_NO_BUFFER_MSG)
     end
-    return setdata(S, imag(data(S)))
+    out = Dense{real(eltype(S))}(buf, length(S))
+    out .= imag.(data(S))
+    return out
 end
 
 function Base.complex(S::Dense{<:Any, <:UnsafeArray})
     buf = get_alloc_buffer()
-    if buf !== nothing
-        out = Dense{complex(eltype(S))}(buf, length(S))
-        out .= complex.(data(S))
-        return out
+    if buf === nothing
+        error(_NO_BUFFER_MSG)
     end
-    return setdata(S, complex(data(S)))
+    out = Dense{complex(eltype(S))}(buf, length(S))
+    out .= complex.(data(S))
+    return out
 end
 
 function -(S::Dense{<:Any, <:UnsafeArray})
     buf = get_alloc_buffer()
-    if buf !== nothing
-        out = Dense{eltype(S)}(buf, length(S))
-        out .= .-data(S)
-        return out
+    if buf === nothing
+        error(_NO_BUFFER_MSG)
     end
-    return setdata(S, -data(S))
+    out = Dense{eltype(S)}(buf, length(S))
+    out .= .-data(S)
+    return out
 end
 
 function (S::Dense{<:Any, <:UnsafeArray} * x::Number)
     buf = get_alloc_buffer()
-    if buf !== nothing
-        out = Dense{eltype(S)}(buf, length(S))
-        out .= data(S) .* x
-        return out
+    if buf === nothing
+        error(_NO_BUFFER_MSG)
     end
-    return setdata(S, x * data(S))
+    out = Dense{eltype(S)}(buf, length(S))
+    out .= data(S) .* x
+    return out
 end
 
 (x::Number * S::Dense{<:Any, <:UnsafeArray}) = S * x
+
+function Base.:/(S::Dense{<:Any, <:UnsafeArray}, x::Number)
+    buf = get_alloc_buffer()
+    if buf === nothing
+        error(_NO_BUFFER_MSG)
+    end
+    out = Dense{eltype(S)}(buf, length(S))
+    out .= data(S) ./ x
+    return out
+end

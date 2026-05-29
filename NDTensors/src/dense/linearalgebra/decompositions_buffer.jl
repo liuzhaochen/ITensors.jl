@@ -29,6 +29,14 @@ function _bufferize_dense(vecdata::AbstractVector{ElT}) where {ElT}
     return result
 end
 
+function _bufferize_diag(vecdata::AbstractVector{ElT}) where {ElT}
+    buf = get_alloc_buffer()
+    buf === nothing && return Diag(vecdata)
+    result = Diag{ElT}(buf, length(vecdata))
+    copyto!(data(result), vecdata)
+    return result
+end
+
 # -----------------------------------------------------------
 # Buffer-aware 2D SVD (extends linearalgebra.jl svd)
 # -----------------------------------------------------------
@@ -117,7 +125,7 @@ function svd(
 
     # Buffer-aware output wrapping
     U = tensor(_bufferize_dense(vec(MU)), Uinds)
-    S = tensor(Diag(MS), Sinds)
+    S = tensor(_bufferize_diag(MS), Sinds)
     V = tensor(_bufferize_dense(vec(MV)), Vinds)
     return U, S, V, spec
 end

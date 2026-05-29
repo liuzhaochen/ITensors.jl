@@ -1,6 +1,6 @@
 @eval module $(gensym())
 using NDTensors
-using NDTensors: Dense, get_alloc_buffer, with_alloc_buffer
+using NDTensors: Dense, get_alloc_buffer, with_alloc_buffer, storage
 using LinearAlgebra: svd, qr
 using Test: @test, @testset
 
@@ -34,6 +34,7 @@ using Test: @test, @testset
             d = Dense{Float64}(get_alloc_buffer(), undef, 5)
             @test length(d) == 5
             @test eltype(d) == Float64
+            @test data(d) isa NDTensors.UnsafeArray
             return d
         end
     end
@@ -44,6 +45,7 @@ using Test: @test, @testset
             d = Dense(get_alloc_buffer(), undef, 5)
             @test length(d) == 5
             @test eltype(d) == Float64
+            @test data(d) isa NDTensors.UnsafeArray
             return d
         end
     end
@@ -52,6 +54,7 @@ using Test: @test, @testset
         buf = NDTensors.Bumper.SlabBuffer()
         result = with_alloc_buffer(buf) do
             d = Dense{Float64}(get_alloc_buffer(), 10)
+            @test data(d) isa NDTensors.UnsafeArray
             fill!(d, 3.14)
             for i in 1:10
                 @test d[i] ≈ 3.14
@@ -67,6 +70,7 @@ using Test: @test, @testset
         result = with_alloc_buffer(buf) do
             d = Dense{Float64}(get_alloc_buffer(), 0)
             @test length(d) == 0
+            @test data(d) isa NDTensors.UnsafeArray
             return d
         end
     end
@@ -244,6 +248,7 @@ using Test: @test, @testset
             a = NDTensors.DenseTensor(Float64, buf, (2, 3))
             fill!(a, 2.0)
             b = a .* 3.0
+            @test data(b) isa NDTensors.UnsafeArray
             @test b[1, 1] ≈ 6.0
             a .+= 1.0
             @test a[1, 1] ≈ 3.0
@@ -276,8 +281,16 @@ using Test: @test, @testset
             @test size(V) == (3, 3)
             @test eltype(U) == Float64
             @test eltype(V) == Float64
-            # Verify reconstruction: svd returns V s.t. A = U * S * V'
-            @test Array(U) * Array(S) * transpose(Array(V)) ≈ Array(a)
+            # Buffer-backed outputs (decompositions_buffer.jl)
+            @test NDTensors.data(NDTensors.storage(U)) isa NDTensors.UnsafeArray
+            @test NDTensors.data(NDTensors.storage(V)) isa NDTensors.UnsafeArray
+            @test NDTensors.data(NDTensors.storage(S)) isa NDTensors.UnsafeArray
+            # Verify reconstruction: A = U * S * V' via tensor contractions
+            US = contract(U, (1, -1), S, (-1, 2))
+            @test NDTensors.data(NDTensors.storage(US)) isa NDTensors.UnsafeArray
+            USV = contract(US, (1, -1), V, (2, -1))
+            @test NDTensors.data(NDTensors.storage(USV)) isa NDTensors.UnsafeArray
+            @test USV ≈ a
         end
     end
 
@@ -292,6 +305,8 @@ using Test: @test, @testset
             @test size(V) == (3, 4, 2)
             @test eltype(U) == Float64
             @test eltype(V) == Float64
+            @test NDTensors.data(NDTensors.storage(U)) isa NDTensors.UnsafeArray
+            @test NDTensors.data(NDTensors.storage(V)) isa NDTensors.UnsafeArray
         end
     end
 
@@ -307,6 +322,8 @@ using Test: @test, @testset
             @test eltype(Q) == Float64
             @test eltype(R) == Float64
             @test Array(Q) * Array(R) ≈ Array(a)
+            @test NDTensors.data(NDTensors.storage(Q)) isa NDTensors.UnsafeArray
+            @test NDTensors.data(NDTensors.storage(R)) isa NDTensors.UnsafeArray
         end
     end
 
@@ -320,6 +337,8 @@ using Test: @test, @testset
             @test size(R) == (2, 3, 4)
             @test eltype(Q) == Float64
             @test eltype(R) == Float64
+            @test NDTensors.data(NDTensors.storage(Q)) isa NDTensors.UnsafeArray
+            @test NDTensors.data(NDTensors.storage(R)) isa NDTensors.UnsafeArray
         end
     end
 
@@ -389,6 +408,15 @@ using Test: @test, @testset
         fill!(d, 3.0)
         @test data(-d) isa Vector{Float64}
         @test data(2.0 * d) isa Vector{Float64}
+    end
+
+    @testset "to_buffer DenseTensor" begin
+        T = NDTensors.DenseTensor(Float64, (3, 4))
+        fill!(data(storage(T)), 1.5)
+        buf = NDTensors.Bumper.SlabBuffer()
+        Tb = NDTensors.to_buffer(T, buf)
+        @test data(storage(Tb)) isa NDTensors.UnsafeArray
+        @test data(storage(Tb)) == data(storage(T))
     end
 end
 

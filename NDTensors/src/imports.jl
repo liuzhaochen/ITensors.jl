@@ -19,6 +19,9 @@ using Strided
 using TimerOutputs
 using TupleTools
 
+import Bumper: Bumper
+import Bumper.UnsafeArrays: UnsafeArray
+
 for lib in [
         :BackendSelection,
         :Expose,

@@ -3,9 +3,6 @@
 # and re-exports Bumper + UnsafeArray for buffer-aware storage types.
 # See .claude/dense_itensor.yaml and .claude/mission.md for context.
 
-import Bumper: Bumper
-import Bumper.UnsafeArrays: UnsafeArray
-
 const ALLOC_BUFFER_KEY = gensym(:alloc_buffer)
 
 """
@@ -52,34 +49,67 @@ const AllocBuffer = Union{
 }
 
 # -----------------------------------------------------------
-# Fallback for non-constructible DenseArray types
+# UnsafeArray: always requires buffer. No heap fallback.
 # -----------------------------------------------------------
-# promote_type(Vector{T}, UnsafeArray{T,1}) = DenseVector{T}
-# which is abstract and can't be constructed via similar.
-# Make it concrete by filling in default type parameters.
 
-# UnsafeArray can only be created via Bumper.alloc!, not via similar(undef).
-# Fall back to Vector when generic_zeros tries to create one.
+const _NO_BUFFER_MSG = "Cannot allocate UnsafeArray: no active buffer. " *
+    "Wrap the code in `with_alloc_buffer(buf) do ... end` or call " *
+    "NDTensors.set_alloc_buffer!(buf) first."
+
+# NDTensors.similar for UnsafeArray — used by storage allocation chain.
+# Requires an active buffer; errors otherwise.
+function NDTensors.similar(::Type{UA}, dims::Dims) where {T, UA <: UnsafeArray{T}}
+    buf = get_alloc_buffer()
+    if buf === nothing
+        error(_NO_BUFFER_MSG)
+    end
+    return Bumper.alloc!(buf, T, dims...)
+end
+
+# Base.similar for UnsafeArray — used by permutedims and other Base functions.
+# Instance-level: intercepts Base's similar(a::AbstractArray{T}, dims::Tuple).
+function Base.similar(a::UnsafeArray{T, N}, dims::Dims) where {T, N}
+    buf = get_alloc_buffer()
+    if buf === nothing
+        error(_NO_BUFFER_MSG)
+    end
+    return Bumper.alloc!(buf, T, dims...)
+end
+
+# Type-level catch for direct similar(::Type{<:UnsafeArray}, dims) calls.
+function Base.similar(::Type{UA}, dims::Dims) where {T, N, UA <: UnsafeArray{T, N}}
+    buf = get_alloc_buffer()
+    if buf === nothing
+        error(_NO_BUFFER_MSG)
+    end
+    return Bumper.alloc!(buf, T, dims...)
+end
+
+# generic_zeros for UnsafeArray — uses buffer when active, errors otherwise.
 function generic_zeros(
-    arraytype::Type{<:Bumper.UnsafeArrays.UnsafeArray}, dims::Integer
-)
-    return generic_zeros(Vector{eltype(arraytype)}, dims)
+    arraytype::Type{<:UnsafeArray{T}}, dims::Integer
+) where {T}
+    buf = get_alloc_buffer()
+    if buf === nothing
+        error(_NO_BUFFER_MSG)
+    end
+    return Bumper.alloc!(buf, T, dims)
 end
 
 # Fix promote_type for UnsafeArray: promote to Vector or UnsafeArray,
 # never to abstract DenseVector/DenseMatrix.
 function Base.promote_type(
     ::Type{UA}, ::Type{UA}
-) where {T, N, UA <: Bumper.UnsafeArrays.UnsafeArray{T, N}}
+) where {T, N, UA <: UnsafeArray{T, N}}
     return UA
 end
 function Base.promote_type(
-    ::Type{<:Bumper.UnsafeArrays.UnsafeArray{T}}, ::Type{A}
+    ::Type{<:UnsafeArray{T}}, ::Type{A}
 ) where {T, A <: AbstractArray{T}}
     return A
 end
 function Base.promote_type(
-    ::Type{A}, ::Type{<:Bumper.UnsafeArrays.UnsafeArray{T}}
+    ::Type{A}, ::Type{<:UnsafeArray{T}}
 ) where {T, A <: AbstractArray{T}}
     return A
 end

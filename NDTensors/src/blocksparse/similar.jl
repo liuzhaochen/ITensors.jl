@@ -2,6 +2,8 @@ using SparseArrays: nnz
 using TypeParameterAccessors: similartype
 
 # NDTensors.similar
+# NOTE: BlockSparse{<:UnsafeArray} has a specialized method in
+# blocksparse_buffer.jl that requires an active buffer.
 function similar(storagetype::Type{<:BlockSparse}, blockoffsets::BlockOffsets, dims::Tuple)
     data = similar(datatype(storagetype), nnz(blockoffsets, dims))
     return BlockSparse(data, blockoffsets)

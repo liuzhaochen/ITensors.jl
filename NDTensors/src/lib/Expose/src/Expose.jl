@@ -19,6 +19,8 @@ include("functions/linearalgebra.jl")
 include("functions/mul.jl")
 include("functions/permutedims.jl")
 include("functions/adapt.jl")
+# [FORK] Exposed{<:UnsafeArray} dispatch for @strided ops on buffer tensors
+include("functions/unsafearray.jl")
 
 export IsWrappedArray, expose, Exposed, unexpose, cpu
 
