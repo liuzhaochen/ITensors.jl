@@ -60,7 +60,7 @@ enabled, uses _block_contract! (buffer-safe) inside a custom parallel
 loop. When single-threaded, delegates to the generic SequentialEx path.
 """
 function contract!(
-    R::BlockSparseTensor{ElR, NR, <:BlockSparse{ElR, <:UnsafeArray{ElR, 1}, NR}},
+    R::BlockSparseTensor{ElR, NR, <:Any, <:BlockSparse{ElR, <:UnsafeArray{ElR, 1}, NR}},
     labelsR,
     tensor1::BlockSparseTensor,
     labelstensor1,
