@@ -92,6 +92,8 @@ include("blocksparse/diagblocksparse.jl")
 include("blocksparse/similar.jl")
 # [FORK] Buffer-aware BlockSparse storage
 include("blocksparse/blocksparse_buffer.jl")
+# [FORK] Thread-safe BlockSparse contraction for buffer-backed tensors
+include("blocksparse/contract_threaded_buffer.jl")
 include("blocksparse/combiner.jl")
 include("blocksparse/linearalgebra.jl")
 

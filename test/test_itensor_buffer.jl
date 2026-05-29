@@ -3,6 +3,7 @@ using ITensors
 using ITensors: to_buffer, hassameinds
 using NDTensors: NDTensors, Bumper, DenseTensor, data as ndata
 using NDTensors: get_alloc_buffer, set_alloc_buffer!, with_alloc_buffer
+using NDTensors: enable_threaded_blocksparse, disable_threaded_blocksparse
 using LinearAlgebra: norm, dot
 using Test: @test, @test_throws, @testset
 
@@ -64,7 +65,9 @@ using Test: @test, @test_throws, @testset
 
         A = to_buffer(random_itensor(i, j), buf)
         A_copy = copy(A)
-        @test norm(A_copy - A) < 1e-10
+        with_alloc_buffer(buf) do
+            @test norm(A_copy - A) < 1e-10
+        end
         @test ndata(NDTensors.storage(A_copy)) isa Vector
     end
 
@@ -145,9 +148,11 @@ using Test: @test, @test_throws, @testset
         j = Index(3, "j")
 
         A = to_buffer(random_itensor(i, j), buf)
-        Ad = dag(A)
-        @test ndims(Ad) == 2
-        @test norm(Ad) > 0
+        with_alloc_buffer(buf) do
+            Ad = dag(A)
+            @test ndims(Ad) == 2
+            @test norm(Ad) > 0
+        end
     end
 
     @testset "scalar multiplication of buffer ITensor" begin
@@ -208,10 +213,12 @@ using Test: @test, @test_throws, @testset
         j = Index(4, "j")
 
         A = to_buffer(random_itensor(i, j), buf)
-        Ap = permute(A, j, i)
-        @test inds(Ap) == (j, i)
-        @test A[i => 1, j => 1] ≈ Ap[j => 1, i => 1]
-        @test A[i => 2, j => 3] ≈ Ap[j => 3, i => 2]
+        with_alloc_buffer(buf) do
+            Ap = permute(A, j, i)
+            @test inds(Ap) == (j, i)
+            @test A[i => 1, j => 1] ≈ Ap[j => 1, i => 1]
+            @test A[i => 2, j => 3] ≈ Ap[j => 3, i => 2]
+        end
     end
 
     @testset "inner product of buffer ITensors" begin
@@ -234,10 +241,12 @@ using Test: @test, @test_throws, @testset
         j = Index(4, "j")
 
         A = to_buffer(random_itensor(i, j), buf)
-        arr = Array(A, i, j)
-        @test arr isa Matrix{Float64}
-        @test size(arr) == (3, 4)
-        @test arr ≈ array(A)
+        with_alloc_buffer(buf) do
+            arr = Array(A, i, j)
+            @test arr isa Matrix{Float64}
+            @test size(arr) == (3, 4)
+            @test arr ≈ array(A)
+        end
     end
 
     @testset "to_buffer outside with_alloc_buffer still works" begin
@@ -319,9 +328,19 @@ using Test: @test, @test_throws, @testset
         buf = Bumper.SlabBuffer()
         i = Index(3, "i")
         A = to_buffer(random_itensor(ComplexF64, i), buf)
-        Ar = real(A)
-        Ai = imag(A)
-        @test norm(Ar + im * Ai - A) < 1e-10
+        with_alloc_buffer(buf) do
+            Ar = real(A)
+            Ai = imag(A)
+            @test ndata(NDTensors.storage(Ar)) isa NDTensors.UnsafeArray
+            @test ndata(NDTensors.storage(Ai)) isa NDTensors.UnsafeArray
+            @test eltype(Ar) == Float64
+            @test eltype(Ai) == Float64
+            # Compare element-by-element to avoid norm dispatch issue
+            for n in 1:dim(i)
+                @test Ar[i => n] ≈ real(A[i => n])
+                @test Ai[i => n] ≈ imag(A[i => n])
+            end
+        end
     end
 
     @testset "sum/prod of buffer ITensor" begin
@@ -337,14 +356,18 @@ using Test: @test, @test_throws, @testset
         i = Index(3, "i")
         j = Index(4, "j")
         A = to_buffer(random_itensor(i, j), buf)
-        M = Matrix(A, i, j)
-        @test M isa Matrix{Float64}
-        @test size(M) == (3, 4)
+        with_alloc_buffer(buf) do
+            M = Matrix(A, i, j)
+            @test M isa Matrix{Float64}
+            @test size(M) == (3, 4)
+        end
 
         v = to_buffer(random_itensor(i), buf)
-        V = Vector(v)
-        @test V isa Vector{Float64}
-        @test length(V) == 3
+        with_alloc_buffer(buf) do
+            V = Vector(v)
+            @test V isa Vector{Float64}
+            @test length(V) == 3
+        end
     end
 
     @testset "dot buffer × heap ITensor" begin
@@ -352,8 +375,10 @@ using Test: @test, @test_throws, @testset
         i = Index(5, "i")
         A_buf = to_buffer(random_itensor(i), buf)
         B_heap = random_itensor(i)
-        ip = dot(A_buf, B_heap)
-        @test ip ≈ sum(array(A_buf) .* array(B_heap))
+        with_alloc_buffer(buf) do
+            ip = dot(A_buf, B_heap)
+            @test ip ≈ sum(array(A_buf) .* array(B_heap))
+        end
     end
 
     @testset "complex/conj of buffer ITensor" begin
@@ -375,8 +400,10 @@ using Test: @test, @test_throws, @testset
         A = to_buffer(random_itensor(i), buf)
         B = to_buffer(random_itensor(i), buf)
         C = copy(A)
-        axpy!(2.0, B, C)
-        @test C ≈ A + 2.0 * B
+        with_alloc_buffer(buf) do
+            axpy!(2.0, B, C)
+            @test C ≈ A + 2.0 * B
+        end
     end
 
     @testset "scalar mul! on buffer ITensor" begin
@@ -438,7 +465,7 @@ using Test: @test, @test_throws, @testset
         @test Ab[i' => 2, dag(i) => 2] ≈ A[i' => 2, dag(i) => 2]
     end
 
-    @testset "buffer×heap QN contraction returns buffer" begin
+    @testset "buffer×heap QN contraction returns heap (mixed types)" begin
         i = Index([QN(0) => 2, QN(1) => 1], "i")
         j = Index([QN(0) => 2, QN(1) => 1], "j")
         k = Index([QN(0) => 2, QN(1) => 1], "k")
@@ -448,7 +475,8 @@ using Test: @test, @test_throws, @testset
         Ab = to_buffer(A, buf)
         with_alloc_buffer(buf) do
             C = Ab * B
-            @test ndata(NDTensors.storage(C)) isa NDTensors.UnsafeArray
+            # Mixed buffer×heap → heap (promote_type: UnsafeArray × Vector = Vector)
+            @test ndata(NDTensors.storage(C)) isa Vector
             @test flux(C) == QN(0)
             @test C ≈ A * B
         end
@@ -571,8 +599,10 @@ using Test: @test, @test_throws, @testset
         i = Index(4, "i")
         A = to_buffer(random_itensor(i), buf)
         B = to_buffer(random_itensor(i), buf)
-        @test A ≈ A
-        @test !(A ≈ B)
+        with_alloc_buffer(buf) do
+            @test A ≈ A
+            @test !(A ≈ B)
+        end
     end
 
     # ── copyto! ──
@@ -585,8 +615,10 @@ using Test: @test, @test_throws, @testset
         A = to_buffer(itensor(M, i, j), buf)
         N = 2 * M
         B = to_buffer(itensor(N, i, j), buf)
-        copyto!(A, B)
-        @test A ≈ B
+        with_alloc_buffer(buf) do
+            copyto!(A, B)
+            @test A ≈ B
+        end
     end
 
     # ── mul! (3-arg) ──
@@ -613,6 +645,31 @@ using Test: @test, @test_throws, @testset
         A = to_buffer(random_itensor(i, j), buf)
         A .= 1.0
         @test all(ndata(NDTensors.storage(A)) .== 1.0)
+    end
+
+    # ── Threaded buffer QN contraction ──
+    if Threads.nthreads() > 1
+        @testset "threaded QN buffer contraction" begin
+            i = Index([QN(0) => 5, QN(1) => 3], "i")
+            j = Index([QN(0) => 5, QN(1) => 3], "j")
+            k = Index([QN(0) => 5, QN(1) => 3], "k")
+            A = random_itensor(QN(0), i, j)
+            B = random_itensor(QN(0), j', k)
+            C_ref = A * B
+
+            buf = Bumper.SlabBuffer()
+            Ab = to_buffer(A, buf)
+            Bb = to_buffer(B, buf)
+            enable_threaded_blocksparse()
+            C_thr = with_alloc_buffer(buf) do
+                Ab * Bb
+            end
+            disable_threaded_blocksparse()
+            @test ndata(NDTensors.storage(C_thr)) isa NDTensors.UnsafeArray
+            with_alloc_buffer(buf) do
+                @test C_thr ≈ C_ref
+            end
+        end
     end
 end
 

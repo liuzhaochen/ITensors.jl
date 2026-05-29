@@ -345,6 +345,74 @@ using Test: @test, @test_throws, @testset
             @test eltype(Ti) == Float32
         end
     end
+
+    # ── Multi-threaded contraction ──
+    # These tests require julia -t N with N >= 2
+    if Threads.nthreads() > 1
+        @testset "threaded contraction buffer Float64" begin
+            locs1 = [(1, 2), (2, 1)]; inds1 = ([2, 3], [4, 5])
+            locs2 = [(1, 2), (2, 1)]; inds2 = ([4, 5], [6, 7])
+            A_heap = BlockSparseTensor{Float64}(locs1, inds1...)
+            B_heap = BlockSparseTensor{Float64}(locs2, inds2...)
+            dA = data(storage(A_heap)); for i in eachindex(dA); dA[i] = randn(); end
+            dB = data(storage(B_heap)); for i in eachindex(dB); dB[i] = randn(); end
+            C_ref = contract(A_heap, (1, 2), B_heap, (2, 3), (1, 3))
+
+            buf = Bumper.SlabBuffer()
+            NDTensors.enable_threaded_blocksparse()
+            C_thr = with_alloc_buffer(buf) do
+                A_buf = NDTensors.to_buffer(A_heap, buf)
+                B_buf = NDTensors.to_buffer(B_heap, buf)
+                contract(A_buf, (1, 2), B_buf, (2, 3), (1, 3))
+            end
+            NDTensors.disable_threaded_blocksparse()
+            @test data(storage(C_thr)) isa NDTensors.UnsafeArray
+            @test C_ref ≈ C_thr
+        end
+
+        @testset "threaded contraction buffer Float32" begin
+            locs1 = [(1, 2), (2, 1)]; inds1 = ([2, 3], [4, 5])
+            locs2 = [(1, 2), (2, 1)]; inds2 = ([4, 5], [6, 7])
+            A_heap = BlockSparseTensor{Float32}(locs1, inds1...)
+            B_heap = BlockSparseTensor{Float32}(locs2, inds2...)
+            dA = data(storage(A_heap)); for i in eachindex(dA); dA[i] = randn(Float32); end
+            dB = data(storage(B_heap)); for i in eachindex(dB); dB[i] = randn(Float32); end
+            C_ref = contract(A_heap, (1, 2), B_heap, (2, 3), (1, 3))
+
+            buf = Bumper.SlabBuffer()
+            NDTensors.enable_threaded_blocksparse()
+            C_thr = with_alloc_buffer(buf) do
+                A_buf = NDTensors.to_buffer(A_heap, buf)
+                B_buf = NDTensors.to_buffer(B_heap, buf)
+                contract(A_buf, (1, 2), B_buf, (2, 3), (1, 3))
+            end
+            NDTensors.disable_threaded_blocksparse()
+            @test data(storage(C_thr)) isa NDTensors.UnsafeArray
+            @test C_ref ≈ C_thr
+        end
+
+        @testset "threaded contraction buffer large blocks" begin
+            locs = [(1, 3), (2, 1), (3, 2)]
+            indsA = ([30, 40, 50], [60, 70, 80])
+            indsB = ([60, 70, 80], [90, 100, 110])
+            A_heap = BlockSparseTensor{Float64}(locs, indsA...)
+            B_heap = BlockSparseTensor{Float64}(locs, indsB...)
+            dA = data(storage(A_heap)); for i in eachindex(dA); dA[i] = randn(); end
+            dB = data(storage(B_heap)); for i in eachindex(dB); dB[i] = randn(); end
+            C_ref = contract(A_heap, (1, 2), B_heap, (2, 3), (1, 3))
+
+            buf = Bumper.SlabBuffer()
+            NDTensors.enable_threaded_blocksparse()
+            C_thr = with_alloc_buffer(buf) do
+                A_buf = NDTensors.to_buffer(A_heap, buf)
+                B_buf = NDTensors.to_buffer(B_heap, buf)
+                contract(A_buf, (1, 2), B_buf, (2, 3), (1, 3))
+            end
+            NDTensors.disable_threaded_blocksparse()
+            @test data(storage(C_thr)) isa NDTensors.UnsafeArray
+            @test C_ref ≈ C_thr
+        end
+    end
 end
 
 nothing
