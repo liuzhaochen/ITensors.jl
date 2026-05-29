@@ -182,6 +182,31 @@ function similar(
     return BlockSparse(data, blockoffsets)
 end
 
+# -----------------------------------------------------------
+# Fast path for contraction_output_type with UnsafeArray
+# -----------------------------------------------------------
+
+"""
+    contraction_output_type(
+        ::Type{<:Tensor{ElT1, N1, <:BlockSparse{ElT1, UnsafeArray{ElT1, 1}, N1}}},
+        ::Type{<:Tensor{ElT2, N2, <:BlockSparse{ElT2, UnsafeArray{ElT2, 1}, N2}}},
+        inds
+    )
+
+Fast path for `BlockSparse{UnsafeArray}`. Avoids the generic
+`promote_type(VecT, VecT)` chain which allocates for package types.
+Uses `promote_type(ElT1, ElT2)` (fast built-in, ~2ns) instead.
+"""
+function contraction_output_type(
+    ::Type{<:Tensor{ElT1, N1, <:BlockSparse{ElT1, UnsafeArray{ElT1, 1}, N1}}},
+    ::Type{<:Tensor{ElT2, N2, <:BlockSparse{ElT2, UnsafeArray{ElT2, 1}, N2}}},
+    inds::Tuple
+) where {ElT1, ElT2, N1, N2}
+    ElT = promote_type(ElT1, ElT2)
+    StoreR = BlockSparse{ElT, UnsafeArray{ElT, 1}, length(inds)}
+    return Tensor{ElT, length(inds), StoreR, typeof(inds)}
+end
+
 """
     to_buffer(T::BlockSparseTensor{ElT}, buf::AllocBuffer)
 
