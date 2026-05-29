@@ -111,8 +111,11 @@ function _contract_buffer_threaded!(
     n_groups = length(grouped)
     n_groups == 0 && return nothing
 
-    # Chunk the groups across threads
-    group_vals = values(grouped)
+    # Chunk the groups across threads.
+    # Must collect values into a plain Vector because the Dictionaries.jl
+    # Values wrapper uses the Dictionary key type for indexing, and there
+    # is no convert(::Type{Block{N}}, ::Int) method.
+    group_vals = collect(values(grouped))
     chunk_size = cld(n_groups, n)
     chunks = [
         group_vals[i:min(i + chunk_size - 1, n_groups)]
