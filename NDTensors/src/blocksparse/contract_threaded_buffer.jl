@@ -21,6 +21,26 @@
 using .Expose: expose
 
 """
+    _tblis_wrap(block::DenseTensor)
+
+Wrap an UnsafeArray-backed Dense block as a regular `Array`-backed view
+for TBLIS compatibility. Zero-copy via `Base.unsafe_wrap` — the returned
+tensor aliases the same buffer memory. Heap-backed blocks pass through
+unchanged.
+"""
+function _tblis_wrap(block::DenseTensor{ElT}) where {ElT}
+    vec = data(storage(block))
+    if vec isa UnsafeArray
+        ptr = pointer(vec)
+        len = length(vec)
+        wrapped = Base.unsafe_wrap(Array{ElT}, ptr, len; own=false)
+        return tensor(Dense{ElT}(wrapped), inds(block))
+    else
+        return block
+    end
+end
+
+"""
     _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2, α, β)
 
 Buffer-safe per-block DenseTensor contraction. Tries TBLIS first (zero
@@ -31,11 +51,16 @@ allocates on the heap (thread-safe, GC reclaims immediately).
 function _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2, α, β)
     # Try TBLIS: no permutedims, no buffer allocation.
     # The NDTensorsTBLISExt extension auto-loads when TBLIS is installed
-    # and contract!(Val(:TBLIS), ...) is first called. If TBLIS is not
-    # installed or types don't match, MethodError is caught below.
+    # and contract!(Val(:TBLIS), ...) is first called.
+    # Wrap UnsafeArray blocks as regular Array via unsafe_wrap so TBLIS
+    # can accept them (TTensor.data::Array{T} constraint).
     if eltype(R_block) <: LinearAlgebra.BlasReal
         try
-            contract!(Val(:TBLIS), R_block, labelsR, t1_block, labels1, t2_block, labels2, α, β)
+            contract!(Val(:TBLIS),
+                _tblis_wrap(R_block), labelsR,
+                _tblis_wrap(t1_block), labels1,
+                _tblis_wrap(t2_block), labels2,
+                α, β)
             return
         catch e
             e isa MethodError || rethrow()

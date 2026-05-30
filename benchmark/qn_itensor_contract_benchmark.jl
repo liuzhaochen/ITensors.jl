@@ -1,80 +1,111 @@
-# BlockSparse contraction benchmark: heap vs buffer, single vs threaded
+# QN ITensor contraction benchmark: heap vs buffer, single vs threaded
 # Uses BenchmarkTools for proper statistics.
 #
+# QN block structure (5 sectors):
+#   QN(0) => large bond dim (DMRG-like)
+#   QN(±1), QN(±2) => smaller virtual dims
+# This gives 5 non-zero blocks per tensor (QN-conserving with flux QN(0)).
+#
 # Usage:
-#   julia -t 4 --project=benchmark NDTensors/benchmark/blocksparse_contract_benchmark.jl
+#   julia -t 4 --project=benchmark benchmark/qn_itensor_contract_benchmark.jl
 
-using NDTensors
-using NDTensors: Bumper, with_alloc_buffer, storage, contract, to_buffer
+using ITensors
+using ITensors: to_buffer
+using NDTensors: Bumper, with_alloc_buffer
+using NDTensors: enable_threaded_blocksparse, disable_threaded_blocksparse
 using LinearAlgebra, BenchmarkTools
 
 BLAS.set_num_threads(1)
-NDTensors.Strided.disable_threads()
+ITensors.NDTensors.Strided.disable_threads()
 
 # Trigger TBLIS extension loading if available
 isdefined(Base, :get_extension) || error("Julia 1.10+ required")
 try
-    Base.get_extension(NDTensors, :NDTensorsTBLISExt) === nothing && @eval import TBLIS
+    Base.get_extension(ITensors.NDTensors, :NDTensorsTBLISExt) === nothing && @eval import TBLIS
 catch
 end
-has_tblis = Base.get_extension(NDTensors, :NDTensorsTBLISExt) !== nothing
+has_tblis = Base.get_extension(ITensors.NDTensors, :NDTensorsTBLISExt) !== nothing
 if has_tblis
     try TBLIS.set_num_threads(1) catch end
 end
 
 const NTHREADS = Threads.nthreads()
 println("="^70)
-println("BlockSparse Contraction Benchmark (BenchmarkTools)")
+println("QN ITensor Contraction Benchmark (BenchmarkTools)")
 println("="^70)
 println("Julia threads:  $NTHREADS")
 println("BLAS threads:   $(BLAS.get_num_threads())")
-println("Strided threads: $(NDTensors.Strided.get_num_threads())")
+println("Strided threads: $(ITensors.NDTensors.Strided.get_num_threads())")
 println("TBLIS loaded:   $has_tblis")
 has_tblis && println("TBLIS threads:  $(TBLIS.get_num_threads())")
 
 # ---------------------------------------------------------------------------
-# Tensor setup: block-sparse with multiple blocks
+# QN Index setup: 5 QN sectors, DMRG-like dimensions
 # ---------------------------------------------------------------------------
-const BLOCKS_A = [(1, 3), (2, 1), (3, 2)]
-const BLOCKS_B = [(1, 3), (2, 1), (3, 2)]
-const DIMS_A = ([100, 200, 300], [150, 250, 350])
-const DIMS_B = ([150, 250, 350], [200, 300, 400])
+# 10 QN blocks per index, same total dim=1000 as before:
+#   QN(0) × 200, QN(0) × 100  (2 blocks, sum=300)
+#   QN(1) × 100, QN(1) × 100  (2 blocks, sum=200)
+#   QN(-1) × 100, QN(-1) × 100 (2 blocks, sum=200)
+#   QN(2) × 100, QN(2) × 50   (2 blocks, sum=150)
+#   QN(-2) × 100, QN(-2) × 50  (2 blocks, sum=150)
+# Total: 10 blocks, dim=1000
 
-function fill_tensors!(A, B)
-    fill!(storage(A), 1.0)
-    fill!(storage(B), 2.0)
-end
+const BLOCK_SPEC = [
+    QN(0) => 200, QN(0) => 100,
+    QN(1) => 100, QN(1) => 100,
+    QN(-1) => 100, QN(-1) => 100,
+    QN(2) => 100, QN(2) => 50,
+    QN(-2) => 100, QN(-2) => 50,
+]
 
-const A_HEAP = NDTensors.BlockSparseTensor{Float64}(BLOCKS_A, DIMS_A...)
-const B_HEAP = NDTensors.BlockSparseTensor{Float64}(BLOCKS_B, DIMS_B...)
-fill_tensors!(A_HEAP, B_HEAP)
+const i = Index(BLOCK_SPEC, "i")
+const j = Index(BLOCK_SPEC, "j")
+const k = Index(BLOCK_SPEC, "k")
+
+println("\nIndex structure:")
+println("  i: $(dim(i)) total dim, $(nblocks(space(i))) QN blocks")
+println("  j: $(dim(j)) total dim, $(nblocks(space(j))) QN blocks")
+println("  k: $(dim(k)) total dim, $(nblocks(space(k))) QN blocks")
+
+const A_HEAP = random_itensor(QN(0), i, j)
+const B_HEAP = random_itensor(QN(0), dag(j), k)
+
+println("  A nnz: $(nnz(A_HEAP)) / $(dim(i)*dim(j)) elements")
+println("  B nnz: $(nnz(B_HEAP)) / $(dim(j)*dim(k)) elements")
 
 # ---------------------------------------------------------------------------
 # Correctness check
 # ---------------------------------------------------------------------------
 println("\n--- Correctness ---")
-C_ref = contract(A_HEAP, (1, 2), B_HEAP, (2, 3), (1, 3))
+C_ref = A_HEAP * B_HEAP
 
-buf_seq = Bumper.SlabBuffer()
+buf_seq = Bumper.SlabBuffer{2^25}()
 C_buf_seq = with_alloc_buffer(buf_seq) do
     Bumper.reset_buffer!(buf_seq)
-    contract(to_buffer(A_HEAP, buf_seq), (1, 2), to_buffer(B_HEAP, buf_seq), (2, 3), (1, 3))
+    to_buffer(A_HEAP, buf_seq) * to_buffer(B_HEAP, buf_seq)
 end
-println("Buffer sequential match: ", isapprox(C_ref, C_buf_seq, rtol=1e-10))
+buf_check = Bumper.SlabBuffer{2^25}()
+with_alloc_buffer(buf_check) do
+    Bumper.reset_buffer!(buf_check)
+    println("Buffer sequential match: ", isapprox(C_ref, C_buf_seq))
+end
 
-buf_thr = Bumper.SlabBuffer()
-NDTensors.enable_threaded_blocksparse()
+buf_thr = Bumper.SlabBuffer{2^25}()
+enable_threaded_blocksparse()
 C_buf_thr = with_alloc_buffer(buf_thr) do
     Bumper.reset_buffer!(buf_thr)
-    contract(to_buffer(A_HEAP, buf_thr), (1, 2), to_buffer(B_HEAP, buf_thr), (2, 3), (1, 3))
+    to_buffer(A_HEAP, buf_thr) * to_buffer(B_HEAP, buf_thr)
 end
-NDTensors.disable_threaded_blocksparse()
-println("Buffer threaded match:   ", isapprox(C_ref, C_buf_thr, rtol=1e-10))
+disable_threaded_blocksparse()
+with_alloc_buffer(buf_check) do
+    Bumper.reset_buffer!(buf_check)
+    println("Buffer threaded match:   ", isapprox(C_ref, C_buf_thr))
+end
 
-NDTensors.enable_threaded_blocksparse()
-C_heap_thr = contract(A_HEAP, (1, 2), B_HEAP, (2, 3), (1, 3))
-NDTensors.disable_threaded_blocksparse()
-println("Heap threaded match:     ", isapprox(C_ref, C_heap_thr, rtol=1e-10))
+enable_threaded_blocksparse()
+C_heap_thr = A_HEAP * B_HEAP
+disable_threaded_blocksparse()
+println("Heap threaded match:     ", isapprox(C_ref, C_heap_thr))
 
 # ---------------------------------------------------------------------------
 # Benchmark functions
@@ -82,36 +113,34 @@ println("Heap threaded match:     ", isapprox(C_ref, C_heap_thr, rtol=1e-10))
 println("\n--- Benchmark ---")
 
 function bench_heap_seq()
-    A = NDTensors.BlockSparseTensor{Float64}(BLOCKS_A, DIMS_A...)
-    B = NDTensors.BlockSparseTensor{Float64}(BLOCKS_B, DIMS_B...)
-    fill_tensors!(A, B)
-    contract(A, (1, 2), B, (2, 3), (1, 3))
+    A = random_itensor(QN(0), i, j)
+    B = random_itensor(QN(0), dag(j), k)
+    A * B
 end
 
 function bench_heap_thr()
-    NDTensors.enable_threaded_blocksparse()
-    A = NDTensors.BlockSparseTensor{Float64}(BLOCKS_A, DIMS_A...)
-    B = NDTensors.BlockSparseTensor{Float64}(BLOCKS_B, DIMS_B...)
-    fill_tensors!(A, B)
-    r = contract(A, (1, 2), B, (2, 3), (1, 3))
-    NDTensors.disable_threaded_blocksparse()
+    enable_threaded_blocksparse()
+    A = random_itensor(QN(0), i, j)
+    B = random_itensor(QN(0), dag(j), k)
+    r = A * B
+    disable_threaded_blocksparse()
     return r
 end
 
 function bench_buf_seq(buf)
     Bumper.reset_buffer!(buf)
     with_alloc_buffer(buf) do
-        contract(to_buffer(A_HEAP, buf), (1, 2), to_buffer(B_HEAP, buf), (2, 3), (1, 3))
+        to_buffer(A_HEAP, buf) * to_buffer(B_HEAP, buf)
     end
 end
 
 function bench_buf_thr(buf)
     Bumper.reset_buffer!(buf)
-    NDTensors.enable_threaded_blocksparse()
+    enable_threaded_blocksparse()
     r = with_alloc_buffer(buf) do
-        contract(to_buffer(A_HEAP, buf), (1, 2), to_buffer(B_HEAP, buf), (2, 3), (1, 3))
+        to_buffer(A_HEAP, buf) * to_buffer(B_HEAP, buf)
     end
-    NDTensors.disable_threaded_blocksparse()
+    disable_threaded_blocksparse()
     return r
 end
 
@@ -168,4 +197,3 @@ summary_row("Buffer sequential", b_buf_seq, ref)
 summary_row("Buffer threaded", b_buf_thr, ref)
 println("─"^70)
 println("Higher vs heap seq = faster (speedup)")
-

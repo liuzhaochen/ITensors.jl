@@ -1,0 +1,4 @@
+[deps]
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+NDTensors = "23ae76d9-e61a-49c4-8f12-3f1a16adf9cf"
+TBLIS = "48530278-0828-4a49-9772-0f3830dfa1e9"
