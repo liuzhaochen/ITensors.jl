@@ -43,18 +43,17 @@ end
 """
     _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2, α, β)
 
-Buffer-safe per-block DenseTensor contraction. Tries TBLIS first (zero
-buffer allocation, works for BlasReal element types when TBLIS.jl is
-installed). Falls back to clearing the task-local buffer so permutedims
-allocates on the heap (thread-safe, GC reclaims immediately).
+Supported in TBLIS.jl: Float32, Float64, ComplexF32, ComplexF64. Falls
+back to clearing the task-local buffer otherwise (thread-safe, GC
+reclaims immediately).
 """
 function _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2, α, β)
     # Try TBLIS: no permutedims, no buffer allocation.
     # The NDTensorsTBLISExt extension auto-loads when TBLIS is installed
     # and contract!(Val(:TBLIS), ...) is first called.
     # Wrap UnsafeArray blocks as regular Array via unsafe_wrap so TBLIS
-    # can accept them (TTensor.data::Array{T} constraint).
-    if eltype(R_block) <: LinearAlgebra.BlasReal
+    # can accept them (tblis_tensor expects StridedArray).
+    if eltype(R_block) <: Union{Float32, Float64, ComplexF32, ComplexF64}
         try
             contract!(Val(:TBLIS),
                 _tblis_wrap(R_block), labelsR,

@@ -1,42 +1,36 @@
+# TBLIS-accelerated DenseTensor contraction
+#
+# Uses tblis_tensor / tblis_tensor_mult from the modern TBLIS.jl API.
+# Supports Float32, Float64, ComplexF32, ComplexF64 natively.
+
+using TBLIS: tblis_tensor, tblis_tensor_mult
+
 function contract!(
-        ::Val{:TBLIS},
-        R::DenseTensor{ElT},
-        labelsR,
-        T1::DenseTensor{ElT},
-        labelsT1,
-        T2::DenseTensor{ElT},
-        labelsT2,
-        α::ElT,
-        β::ElT
-    ) where {ElT <: LinearAlgebra.BlasReal}
-    # TBLIS Tensors
-    R_tblis = TBLIS.TTensor{ElT}(array(R), β)
-    T1_tblis = TBLIS.TTensor{ElT}(array(T1), α)
-    T2_tblis = TBLIS.TTensor{ElT}(array(T2))
+    ::Val{:TBLIS},
+    R::DenseTensor{ElT},
+    labelsR,
+    T1::DenseTensor{ElT},
+    labelsT1,
+    T2::DenseTensor{ElT},
+    labelsT2,
+    α::ElT,
+    β::ElT,
+) where {ElT <: Union{Float32, Float64, ComplexF32, ComplexF64}}
+    # tblis_tensor wraps a strided array as a TBLIS tensor, storing the
+    # scaling factors α/β internally. No data copy — zero-cost view.
+    R_t = tblis_tensor(array(R), β)
+    T1_t = tblis_tensor(array(T1), α)
+    T2_t = tblis_tensor(array(T2))
 
     function label_to_char(label)
-        # Start at 'a'
-        char_start = Char(96)
-        if label < 0
-            # Start at 'z'
-            char_start = Char(123)
-        end
+        char_start = label < 0 ? Char(123) : Char(96)
         return char_start + label
     end
 
-    function labels_to_tblis(labels)
-        if isempty(labels)
-            return ""
-        end
-        str = prod(label_to_char.(labels))
-        return str
-    end
+    labelsT1_s = prod(label_to_char.(labelsT1))
+    labelsT2_s = prod(label_to_char.(labelsT2))
+    labelsR_s = prod(label_to_char.(labelsR))
 
-    labelsT1_tblis = labels_to_tblis(labelsT1)
-    labelsT2_tblis = labels_to_tblis(labelsT2)
-    labelsR_tblis = labels_to_tblis(labelsR)
-
-    TBLIS.mul!(R_tblis, T1_tblis, T2_tblis, labelsT1_tblis, labelsT2_tblis, labelsR_tblis)
-
+    tblis_tensor_mult(T1_t, labelsT1_s, T2_t, labelsT2_s, R_t, labelsR_s)
     return R
 end
