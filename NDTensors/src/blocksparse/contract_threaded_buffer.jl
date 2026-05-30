@@ -21,44 +21,24 @@
 using .Expose: expose
 
 """
-    _tblis_wrap(block::DenseTensor)
-
-Wrap an UnsafeArray-backed Dense block as a regular `Array`-backed view
-for TBLIS compatibility. Zero-copy via `Base.unsafe_wrap` — the returned
-tensor aliases the same buffer memory. Heap-backed blocks pass through
-unchanged.
-"""
-function _tblis_wrap(block::DenseTensor{ElT}) where {ElT}
-    vec = data(storage(block))
-    if vec isa UnsafeArray
-        ptr = pointer(vec)
-        len = length(vec)
-        wrapped = Base.unsafe_wrap(Array{ElT}, ptr, len; own=false)
-        return tensor(Dense{ElT}(wrapped), inds(block))
-    else
-        return block
-    end
-end
-
-"""
     _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2, α, β)
 
 Supported in TBLIS.jl: Float32, Float64, ComplexF32, ComplexF64. Falls
 back to clearing the task-local buffer otherwise (thread-safe, GC
 reclaims immediately).
+
+Data reshape to logical N-D dimensions is handled inside the TBLIS extension
+via `_tblis_strided_array` — blocks pass through without pre-wrapping.
 """
 function _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2, α, β)
-    # Try TBLIS: no permutedims, no buffer allocation.
-    # The NDTensorsTBLISExt extension auto-loads when TBLIS is installed
-    # and contract!(Val(:TBLIS), ...) is first called.
-    # Wrap UnsafeArray blocks as regular Array via unsafe_wrap so TBLIS
-    # can accept them (tblis_tensor expects StridedArray).
+    # Try TBLIS: avoids permutedims, zero buffer alloc.
+    # The extension reshapes 1D→N-D via unsafe_wrap for correct strides.
     if eltype(R_block) <: Union{Float32, Float64, ComplexF32, ComplexF64}
         try
             contract!(Val(:TBLIS),
-                _tblis_wrap(R_block), labelsR,
-                _tblis_wrap(t1_block), labels1,
-                _tblis_wrap(t2_block), labels2,
+                R_block, labelsR,
+                t1_block, labels1,
+                t2_block, labels2,
                 α, β)
             return
         catch e
