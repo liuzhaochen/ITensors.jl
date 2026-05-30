@@ -9,31 +9,41 @@
 # Multiple threads calling Bumper.alloc! simultaneously corrupts the arena.
 #
 # This override replaces the per-block contract! with a buffer-safe wrapper:
-#   - When TBLIS is available: TBLIS.mul! handles arbitrary-order tensors
-#     natively, avoiding permutedims entirely → zero buffer allocation.
-#   - Otherwise: temporarily clears the task-local buffer so permutedims
-#     allocates on the heap (thread-safe, GC reclaims immediately).
-#
-# Regular (non-BlockSparse) DenseTensor contractions are NOT affected —
-# this override only activates for BlockSparse output tensors with
-# UnsafeArray storage when threading is enabled.
+#   - Float32/Float64 → direct TBLIS (zero alloc, no permutedims).
+#   - ComplexF64      → 4-real TBLIS decomposition with pre-allocated
+#                        buffer scratch (D, S per output block).
+#   - Otherwise       → heap fallback (thread-safe, GC reclaims quickly).
 
 using .Expose: expose
 
-"""
-    _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2, α, β)
+# ===================================================================
+# Main per-block dispatch
+# ===================================================================
 
-Supported in TBLIS.jl: Float32, Float64, ComplexF32, ComplexF64. Falls
-back to clearing the task-local buffer otherwise (thread-safe, GC
-reclaims immediately).
-
-Data reshape to logical N-D dimensions is handled inside the TBLIS extension
-via `_tblis_strided_array` — blocks pass through without pre-wrapping.
 """
-function _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2, α, β)
-    # Try TBLIS: avoids permutedims, zero buffer alloc.
-    # The extension reshapes 1D→N-D via unsafe_wrap for correct strides.
-    if eltype(R_block) <: Union{Float32, Float64, ComplexF32, ComplexF64}
+    _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2, α, β,
+                     scratch=nothing)
+
+Dispatcher for per-block DenseTensor contraction:
+
+- Float32/Float64 → `contract!(Val(:TBLIS), ...)` (direct TBLIS, zero alloc)
+- ComplexF64      → 4-real TBLIS decomposition if `scratch=(D,S)` provided,
+                     otherwise falls through to heap fallback.
+- Other types     → clear buffer, fall back to `expose` + `@strided` (heap).
+"""
+function _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2, α, β,
+                          scratch=nothing)
+    ElR = eltype(R_block)
+
+    # --- ComplexF64: 4-real decomposition with pre-allocated scratch ---
+    if ElR <: ComplexF64 && scratch !== nothing
+        _block_contract_complex!(R_block, labelsR, t1_block, labels1,
+                                 t2_block, labels2, α, β, scratch...)
+        return
+    end
+
+    # --- Float32/Float64: direct TBLIS ---
+    if ElR <: Union{Float32, Float64}
         try
             contract!(Val(:TBLIS),
                 R_block, labelsR,
@@ -45,23 +55,89 @@ function _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2
             e isa MethodError || rethrow()
         end
     end
-    # Fallback: clear buffer so similar → Vector (heap, thread-safe)
-    prev = get_alloc_buffer()
-    set_alloc_buffer!(nothing)
-    try
-        contract!(expose(R_block), labelsR, expose(t1_block), labels1, expose(t2_block), labels2, α, β)
-    finally
-        set_alloc_buffer!(prev)
+
+    # --- Fallback: heap via expose + @strided ---
+    if ElR <: ComplexF64
+        prev = get_alloc_buffer()
+        set_alloc_buffer!(nothing)
+        try
+            contract!(expose(R_block), labelsR,
+                      expose(t1_block), labels1,
+                      expose(t2_block), labels2, α, β)
+        finally
+            set_alloc_buffer!(prev)
+        end
     end
     return nothing
 end
 
+# ===================================================================
+# ComplexF64: 4-real TBLIS decomposition
+# ===================================================================
+
 """
-    contract!(R::BlockSparseTensor{<:Any, <:Any, <:BlockSparse{<:Any, <:UnsafeArray}}, ...)
+    _block_contract_complex!(R_block, labelsR, t1, labels1, t2, labels2, α, β, D, S)
+
+Compute `R = α * T1(op) T2 + β * R` for ComplexF64 by decomposing into
+4 real TBLIS contractions on zero-copy strided Float64 views of the
+complex data:
+
+  1. Calls the extension's `tblis_compute_4real!(D, S, ...)` to compute
+     D = Re(T1)∘Re(T2) - Im(T1)∘Im(T2)
+     S = Re(T1)∘Im(T2) + Im(T1)∘Re(T2)
+  2. Element-wise combines D, S into R with α, β.
+
+D, S are pre-allocated Float64 arrays (from buffer or heap).
+"""
+function _block_contract_complex!(R_block, labelsR, t1_block, labels1,
+                                   t2_block, labels2, α, β, D, S)
+    # Call the extension's 4-real computation
+    ext = isdefined(Base, :get_extension) ?
+          Base.get_extension(@__MODULE__, :NDTensorsTBLISExt) : nothing
+    ext === nothing && error("TBLIS extension not loaded for ComplexF64 contraction")
+    ext.tblis_compute_4real!(D, S, t1_block, labels1, t2_block, labels2, labelsR)
+
+    # Combine D, S into the complex output with α, β
+    # Rr_new = αr*D - αi*S + βr*Rr_old - βi*Ri_old
+    # Ri_new = αi*D + αr*S + βr*Ri_old + βi*Rr_old
+    N = ndims(R_block)
+    aR = array(R_block)
+    if ndims(aR) != N
+        tdims = ntuple(d -> dim(R_block, d), Val(N))
+        aR = Base.unsafe_wrap(Array{ComplexF64}, pointer(aR), tdims; own=false)
+    end
+
+    αr, αi = reim(α)
+    βr, βi = reim(β)
+
+    if iszero(βr) && iszero(βi)
+        @inbounds for i in CartesianIndices(D)
+            d, s = D[i], S[i]
+            aR[i] = ComplexF64(αr * d - αi * s, αi * d + αr * s)
+        end
+    else
+        @inbounds for i in CartesianIndices(D)
+            d, s = D[i], S[i]
+            rr_old, ri_old = reim(aR[i])
+            aR[i] = ComplexF64(
+                αr * d - αi * s + βr * rr_old - βi * ri_old,
+                αi * d + αr * s + βr * ri_old + βi * rr_old
+            )
+        end
+    end
+    return nothing
+end
+
+# ===================================================================
+# BlockSparse-level override
+# ===================================================================
+
+"""
+    contract!(R::BlockSparseTensor{..., BlockSparse{..., UnsafeArray, ...}}, ...)
 
 Override for buffer-backed BlockSparse contraction. When threading is
-enabled, uses _block_contract! (buffer-safe) inside a custom parallel
-loop. When single-threaded, delegates to the generic SequentialEx path.
+enabled, pre-allocates scratch arrays from the buffer (single-threaded,
+safe) then distributes work across `@spawn` tasks.
 """
 function contract!(
     R::BlockSparseTensor{ElR, NR, <:Any, <:BlockSparse{ElR, <:UnsafeArray{ElR, 1}, NR}},
@@ -86,7 +162,6 @@ function contract!(
             R, labelsR, tensor1, labelstensor1, tensor2, labelstensor2, grouped
         )
     else
-        # Single-threaded: use the standard sequential executor (safe)
         contract!(
             R, labelsR, tensor1, labelstensor1, tensor2, labelstensor2,
             contraction_plan, SequentialEx()
@@ -95,12 +170,44 @@ function contract!(
     return R
 end
 
+# ===================================================================
+# Pre-allocate + parallel execution
+# ===================================================================
+
+"""
+    _prealloc_complex_scratch(R, grouped)
+
+Pre-allocate D, S Float64 scratch arrays for each output block that needs
+ComplexF64 4-real decomposition. Allocates from the active buffer (safe
+here because this runs single-threaded, before @spawn).
+
+Returns a Dict{Block{NR}, Tuple{Array{Float64}, Array{Float64}}} or
+`nothing` if no scratch is needed.
+"""
+function _prealloc_complex_scratch(R::BlockSparseTensor{ElR}, grouped) where {ElR}
+    ElR <: ComplexF64 || return nothing
+    buf = get_alloc_buffer()
+    buf === nothing && return nothing
+
+    scratch = Dict{Any, Tuple{Any, Any}}()
+    for (blockR, group) in zip(keys(grouped), values(grouped))
+        isempty(group) && continue
+        R_block = R[blockR]
+        sz = ntuple(d -> dim(R_block, d), Val(ndims(R_block)))
+        D_1d = Bumper.alloc!(buf, Float64, prod(sz))
+        S_1d = Bumper.alloc!(buf, Float64, prod(sz))
+        D = Base.unsafe_wrap(Array{Float64}, pointer(D_1d), sz; own=false)
+        S = Base.unsafe_wrap(Array{Float64}, pointer(S_1d), sz; own=false)
+        scratch[blockR] = (D, S)
+    end
+    return length(scratch) > 0 ? scratch : nothing
+end
+
 """
     _contract_buffer_threaded!(R, labelsR, t1, lt1, t2, lt2, grouped)
 
-Execute grouped block contractions in parallel. Each spawned task uses
-_block_contract! which is safe for buffer-backed tensors (TBLIS or heap
-fallback, never allocates from the shared buffer).
+Execute grouped block contractions in parallel. Pre-allocates complex
+scratch arrays before spawning tasks.
 """
 function _contract_buffer_threaded!(
     R::BlockSparseTensor,
@@ -115,10 +222,10 @@ function _contract_buffer_threaded!(
     n_groups = length(grouped)
     n_groups == 0 && return nothing
 
+    # Pre-allocate complex scratch from buffer (single-threaded, safe)
+    scratch_map = _prealloc_complex_scratch(R, grouped)
+
     # Chunk the groups across threads.
-    # Must collect values into a plain Vector because the Dictionaries.jl
-    # Values wrapper uses the Dictionary key type for indexing, and there
-    # is no convert(::Type{Block{N}}, ::Int) method.
     group_vals = collect(values(grouped))
     chunk_size = cld(n_groups, n)
     chunks = [
@@ -128,7 +235,8 @@ function _contract_buffer_threaded!(
 
     tasks = map(chunks) do chunk
         Threads.@spawn _execute_chunk!(
-            R, labelsR, tensor1, labelstensor1, tensor2, labelstensor2, chunk
+            R, labelsR, tensor1, labelstensor1, tensor2, labelstensor2,
+            chunk, scratch_map,
         )
     end
 
@@ -139,7 +247,7 @@ function _contract_buffer_threaded!(
 end
 
 """
-    _execute_chunk!(R, labelsR, t1, lt1, t2, lt2, groups)
+    _execute_chunk!(R, labelsR, t1, lt1, t2, lt2, groups, scratch_map=nothing)
 
 Process a chunk of contraction groups sequentially on one task.
 Each group reduces into one output block (β-flip).
@@ -151,10 +259,17 @@ function _execute_chunk!(
     labelstensor1,
     tensor2::BlockSparseTensor,
     labelstensor2,
-    groups
+    groups,
+    scratch_map=nothing,
 )
     for contraction_plan_group in groups
         β = zero(eltype(R))
+
+        # Look up scratch for this output block
+        first_contraction = first(contraction_plan_group)
+        scratch = scratch_map === nothing ? nothing :
+                  get(scratch_map, last(first_contraction), nothing)
+
         for block_contraction in contraction_plan_group
             blocktensor1, blocktensor2, blockR = block_contraction
 
@@ -168,7 +283,7 @@ function _execute_chunk!(
                 R[blockR], labelsR,
                 tensor1[blocktensor1], labelstensor1,
                 tensor2[blocktensor2], labelstensor2,
-                α, β
+                α, β, scratch,
             )
 
             if iszero(β)
