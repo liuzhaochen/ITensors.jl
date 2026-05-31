@@ -185,3 +185,79 @@ summary_row("Buffer sequential", b_buf_seq, ref)
 summary_row("Buffer threaded", b_buf_thr, ref)
 println("─"^70)
 println("Higher vs heap seq = faster (speedup)")
+
+# ===================================================================
+# Scalar Contraction (inner product)
+# ===================================================================
+println("\n" * "="^70)
+println("Scalar Contraction (inner, ComplexF64, 2D×2D→0D)")
+println("="^70)
+
+println("\nCorrectness:")
+C_ref_scalar = inner(A_HEAP, A_HEAP)
+
+buf_scalar_seq = Bumper.SlabBuffer{2^25}()
+C_buf_scalar = with_alloc_buffer(buf_scalar_seq) do
+    Bumper.reset_buffer!(buf_scalar_seq)
+    inner(to_buffer(A_HEAP, buf_scalar_seq), to_buffer(A_HEAP, buf_scalar_seq))
+end
+println("  inner(buffer_sequential): ", isapprox(C_ref_scalar, C_buf_scalar))
+
+buf_scalar_thr = Bumper.SlabBuffer{2^25}()
+enable_threaded_blocksparse()
+C_buf_scalar_thr = with_alloc_buffer(buf_scalar_thr) do
+    Bumper.reset_buffer!(buf_scalar_thr)
+    inner(to_buffer(A_HEAP, buf_scalar_thr), to_buffer(A_HEAP, buf_scalar_thr))
+end
+disable_threaded_blocksparse()
+println("  inner(buffer_threaded):   ", isapprox(C_ref_scalar, C_buf_scalar_thr))
+
+println("\nBenchmark:")
+
+function bench_scalar_seq()
+    A = random_itensor(ComplexF64, QN(0), i, j)
+    B = random_itensor(ComplexF64, QN(0), i, j)
+    inner(A, B)
+end
+
+function bench_scalar_thr()
+    enable_threaded_blocksparse()
+    A = random_itensor(ComplexF64, QN(0), i, j)
+    B = random_itensor(ComplexF64, QN(0), i, j)
+    r = inner(A, B)
+    disable_threaded_blocksparse()
+    return r
+end
+
+function bench_scalar_buf_seq(buf)
+    Bumper.reset_buffer!(buf)
+    with_alloc_buffer(buf) do
+        inner(to_buffer(A_HEAP, buf), to_buffer(A_HEAP, buf))
+    end
+end
+
+function bench_scalar_buf_thr(buf)
+    Bumper.reset_buffer!(buf)
+    enable_threaded_blocksparse()
+    r = with_alloc_buffer(buf) do
+        inner(to_buffer(A_HEAP, buf), to_buffer(A_HEAP, buf))
+    end
+    disable_threaded_blocksparse()
+    return r
+end
+
+bench_scalar_seq(); bench_scalar_thr()
+bench_scalar_buf_seq(buf_scalar_seq); bench_scalar_buf_thr(buf_scalar_thr)
+
+b_s_seq = @benchmark bench_scalar_seq() seconds=3
+println("Heap sequential:")
+show(stdout, "text/plain", b_s_seq); println()
+b_s_thr = @benchmark bench_scalar_thr() seconds=3
+println("Heap threaded:")
+show(stdout, "text/plain", b_s_thr); println()
+b_s_buf_seq = @benchmark bench_scalar_buf_seq($buf_scalar_seq) seconds=3
+println("Buffer sequential:")
+show(stdout, "text/plain", b_s_buf_seq); println()
+b_s_buf_thr = @benchmark bench_scalar_buf_thr($buf_scalar_thr) seconds=3
+println("Buffer threaded:")
+show(stdout, "text/plain", b_s_buf_thr); println()

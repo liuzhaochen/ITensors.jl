@@ -13,6 +13,7 @@ using TBLIS: tblis_tensor, tblis_tensor_mult
 # Label conversion
 # ---------------------------------------------------------------------------
 function _tblis_labels(labels)
+    isempty(labels) && return ""
     return prod(labels) do label
         Char((label < 0 ? 123 : 96) + label)
     end

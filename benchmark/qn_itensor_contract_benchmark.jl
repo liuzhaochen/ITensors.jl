@@ -51,11 +51,11 @@ has_tblis && println("TBLIS threads:  $(TBLIS.get_num_threads())")
 # Total: 10 blocks, dim=1000
 
 const BLOCK_SPEC = [
-    QN(0) => 200, QN(0) => 100,
-    QN(1) => 100, QN(1) => 100,
-    QN(-1) => 100, QN(-1) => 100,
-    QN(2) => 100, QN(2) => 50,
-    QN(-2) => 100, QN(-2) => 50,
+    QN(0) => 20, QN(0) => 10,
+    QN(1) => 10, QN(1) => 10,
+    QN(-1) => 10, QN(-1) => 10,
+    QN(2) => 10, QN(2) => 5,
+    QN(-2) => 10, QN(-2) => 5,
 ]
 
 const i = Index(BLOCK_SPEC, "i")
@@ -197,3 +197,82 @@ summary_row("Buffer sequential", b_buf_seq, ref)
 summary_row("Buffer threaded", b_buf_thr, ref)
 println("─"^70)
 println("Higher vs heap seq = faster (speedup)")
+
+# ===================================================================
+# Scalar Contraction (inner product)
+# ===================================================================
+println("\n" * "="^70)
+println("Scalar Contraction (inner product, 3D×3D→0D)")
+println("="^70)
+
+A3d = random_itensor(QN(0), i, dag(j), k)
+B3d = random_itensor(QN(0), i, dag(j), k)  # same indices for inner()
+
+println("\nCorrectness:")
+C_ref = inner(A3d, B3d)
+
+buf_scalar_seq = Bumper.SlabBuffer{2^25}()
+C_buf_scalar = with_alloc_buffer(buf_scalar_seq) do
+    Bumper.reset_buffer!(buf_scalar_seq)
+    inner(to_buffer(A3d, buf_scalar_seq), to_buffer(B3d, buf_scalar_seq))
+end
+println("  inner(buffer_sequential): ", isapprox(C_ref, C_buf_scalar))
+
+buf_scalar_thr = Bumper.SlabBuffer{2^25}()
+enable_threaded_blocksparse()
+C_buf_scalar_thr = with_alloc_buffer(buf_scalar_thr) do
+    Bumper.reset_buffer!(buf_scalar_thr)
+    inner(to_buffer(A3d, buf_scalar_thr), to_buffer(B3d, buf_scalar_thr))
+end
+disable_threaded_blocksparse()
+println("  inner(buffer_threaded):   ", isapprox(C_ref, C_buf_scalar_thr))
+
+println("\nBenchmark:")
+
+function bench_scalar_seq()
+    A = random_itensor(QN(0), i, dag(j), k)
+    B = random_itensor(QN(0), i, dag(j), k)
+    inner(A, B)
+end
+
+function bench_scalar_thr()
+    enable_threaded_blocksparse()
+    A = random_itensor(QN(0), i, dag(j), k)
+    B = random_itensor(QN(0), i, dag(j), k)
+    r = inner(A, B)
+    disable_threaded_blocksparse()
+    return r
+end
+
+function bench_scalar_buf_seq(buf)
+    Bumper.reset_buffer!(buf)
+    with_alloc_buffer(buf) do
+        inner(to_buffer(A3d, buf), to_buffer(B3d, buf))
+    end
+end
+
+function bench_scalar_buf_thr(buf)
+    Bumper.reset_buffer!(buf)
+    enable_threaded_blocksparse()
+    r = with_alloc_buffer(buf) do
+        inner(to_buffer(A3d, buf), to_buffer(B3d, buf))
+    end
+    disable_threaded_blocksparse()
+    return r
+end
+
+bench_scalar_seq(); bench_scalar_thr()
+bench_scalar_buf_seq(buf_scalar_seq); bench_scalar_buf_thr(buf_scalar_thr)
+
+b_s_seq = @benchmark bench_scalar_seq() seconds=3
+println("Heap sequential:")
+show(stdout, "text/plain", b_s_seq); println()
+b_s_thr = @benchmark bench_scalar_thr() seconds=3
+println("Heap threaded:")
+show(stdout, "text/plain", b_s_thr); println()
+b_s_buf_seq = @benchmark bench_scalar_buf_seq($buf_scalar_seq) seconds=3
+println("Buffer sequential:")
+show(stdout, "text/plain", b_s_buf_seq); println()
+b_s_buf_thr = @benchmark bench_scalar_buf_thr($buf_scalar_thr) seconds=3
+println("Buffer threaded:")
+show(stdout, "text/plain", b_s_buf_thr); println()
