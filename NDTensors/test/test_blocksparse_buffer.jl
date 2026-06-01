@@ -3,6 +3,7 @@ using NDTensors: NDTensors, Bumper, BlockSparse, BlockSparseTensor, blockoffsets
 using LinearAlgebra: norm, Diagonal
 using Random: randn!
 using Test: @test, @test_throws, @testset
+using TBLIS
 
 @testset "BlockSparse buffer" begin
     @testset "BlockSparse(buf, blockoffsets, dim)" begin
@@ -398,6 +399,27 @@ using Test: @test, @test_throws, @testset
             A_heap = BlockSparseTensor{Float64}(locs, indsA...)
             B_heap = BlockSparseTensor{Float64}(locs, indsB...)
             dA = data(storage(A_heap)); for i in eachindex(dA); dA[i] = randn(); end
+            dB = data(storage(B_heap)); for i in eachindex(dB); dB[i] = randn(); end
+            C_ref = contract(A_heap, (1, 2), B_heap, (2, 3), (1, 3))
+
+            buf = Bumper.SlabBuffer()
+            NDTensors.enable_threaded_blocksparse()
+            C_thr = with_alloc_buffer(buf) do
+                A_buf = NDTensors.to_buffer(A_heap, buf)
+                B_buf = NDTensors.to_buffer(B_heap, buf)
+                contract(A_buf, (1, 2), B_buf, (2, 3), (1, 3))
+            end
+            NDTensors.disable_threaded_blocksparse()
+            @test data(storage(C_thr)) isa NDTensors.UnsafeArray
+            @test C_ref ≈ C_thr
+        end
+
+        @testset "threaded contraction buffer ComplexF64 × Float64" begin
+            locs1 = [(1, 2), (2, 1)]; inds1 = ([2, 3], [4, 5])
+            locs2 = [(1, 2), (2, 1)]; inds2 = ([4, 5], [6, 7])
+            A_heap = BlockSparseTensor{ComplexF64}(locs1, inds1...)
+            B_heap = BlockSparseTensor{Float64}(locs2, inds2...)
+            dA = data(storage(A_heap)); for i in eachindex(dA); dA[i] = randn() + im * randn(); end
             dB = data(storage(B_heap)); for i in eachindex(dB); dB[i] = randn(); end
             C_ref = contract(A_heap, (1, 2), B_heap, (2, 3), (1, 3))
 

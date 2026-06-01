@@ -35,38 +35,43 @@ function _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2
                           scratch=nothing)
     ElR = eltype(R_block)
 
-    # --- ComplexF64: 4-real decomposition with pre-allocated scratch ---
+    _has_tblis = isdefined(Base, :get_extension) &&
+                 Base.get_extension(@__MODULE__, :NDTensorsTBLISExt) !== nothing
+
+    # --- ComplexF64: 4/2-real TBLIS with pre-allocated scratch ---
     if ElR <: ComplexF64 && scratch !== nothing
+        _has_tblis || error(
+            "TBLIS extension not loaded for buffer-threaded " *
+            "BlockSparse ComplexF64 contraction. Use `using TBLIS`."
+        )
         _block_contract_complex!(R_block, labelsR, t1_block, labels1,
                                  t2_block, labels2, α, β, scratch...)
         return
     end
 
-    # --- Float32/Float64: direct TBLIS ---
-    if ElR <: Union{Float32, Float64}
-        try
-            contract!(Val(:TBLIS),
-                R_block, labelsR,
-                t1_block, labels1,
-                t2_block, labels2,
-                α, β)
-            return
-        catch e
-            e isa MethodError || rethrow()
-        end
+    # --- BlasReal (Float32/Float64): direct TBLIS ---
+    if ElR <: LinearAlgebra.BlasReal
+        _has_tblis || error(
+            "TBLIS extension not loaded for buffer-threaded " *
+            "BlockSparse contraction. Use `using TBLIS`."
+        )
+        contract!(Val(:TBLIS),
+            R_block, labelsR,
+            t1_block, labels1,
+            t2_block, labels2,
+            α, β)
+        return
     end
 
     # --- Fallback: heap via expose + @strided ---
-    if ElR <: ComplexF64
-        prev = get_alloc_buffer()
-        set_alloc_buffer!(nothing)
-        try
-            contract!(expose(R_block), labelsR,
-                      expose(t1_block), labels1,
-                      expose(t2_block), labels2, α, β)
-        finally
-            set_alloc_buffer!(prev)
-        end
+    prev = get_alloc_buffer()
+    set_alloc_buffer!(nothing)
+    try
+        contract!(expose(R_block), labelsR,
+                  expose(t1_block), labels1,
+                  expose(t2_block), labels2, α, β)
+    finally
+        set_alloc_buffer!(prev)
     end
     return nothing
 end
@@ -92,9 +97,7 @@ D, S are pre-allocated Float64 arrays (from buffer or heap).
 function _block_contract_complex!(R_block, labelsR, t1_block, labels1,
                                    t2_block, labels2, α, β, D, S)
     # Call the extension's 4-real computation
-    ext = isdefined(Base, :get_extension) ?
-          Base.get_extension(@__MODULE__, :NDTensorsTBLISExt) : nothing
-    ext === nothing && error("TBLIS extension not loaded for ComplexF64 contraction")
+    ext = Base.get_extension(@__MODULE__, :NDTensorsTBLISExt)
     ext.tblis_compute_4real!(D, S, t1_block, labels1, t2_block, labels2, labelsR)
 
     # Combine D, S into the complex output with α, β

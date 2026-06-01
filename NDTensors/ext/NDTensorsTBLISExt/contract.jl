@@ -140,5 +140,68 @@ function tblis_compute_4real!(
     return nothing
 end
 
+# ---------------------------------------------------------------------------
+# ComplexF64 × BlasReal — 2-real TBLIS (Im(BlasReal) = 0)
+# ---------------------------------------------------------------------------
+function tblis_compute_4real!(
+    D::StridedArray{Float64},
+    S::StridedArray{Float64},
+    T1::DenseTensor{ComplexF64},
+    labelsT1,
+    T2::DenseTensor{<:LinearAlgebra.BlasReal},
+    labelsT2,
+    labelsR,
+)
+    aT1 = _tblis_strided_array(T1)
+    aT2 = _tblis_strided_array(T2)
+    T1r, T1i = _real_imag_views(aT1)
+
+    labT1 = _tblis_labels(labelsT1)
+    labT2 = _tblis_labels(labelsT2)
+    labR = _tblis_labels(labelsR)
+
+    # D = T1r·T2 (overwrite)
+    tblis_tensor_mult(tblis_tensor(T1r, 1.0), labT1,
+                      tblis_tensor(aT2), labT2,
+                      tblis_tensor(D, 0.0), labR)
+    # S = T1i·T2 (overwrite)
+    tblis_tensor_mult(tblis_tensor(T1i, 1.0), labT1,
+                      tblis_tensor(aT2), labT2,
+                      tblis_tensor(S, 0.0), labR)
+
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# BlasReal × ComplexF64 — 2-real TBLIS (Im(BlasReal) = 0)
+# ---------------------------------------------------------------------------
+function tblis_compute_4real!(
+    D::StridedArray{Float64},
+    S::StridedArray{Float64},
+    T1::DenseTensor{<:LinearAlgebra.BlasReal},
+    labelsT1,
+    T2::DenseTensor{ComplexF64},
+    labelsT2,
+    labelsR,
+)
+    aT2 = _tblis_strided_array(T2)
+    T2r, T2i = _real_imag_views(aT2)
+
+    labT1 = _tblis_labels(labelsT1)
+    labT2 = _tblis_labels(labelsT2)
+    labR = _tblis_labels(labelsR)
+
+    # D = T1·T2r (overwrite)
+    tblis_tensor_mult(tblis_tensor(T1, 1.0), labT1,
+                      tblis_tensor(T2r), labT2,
+                      tblis_tensor(D, 0.0), labR)
+    # S = T1·T2i (overwrite)
+    tblis_tensor_mult(tblis_tensor(T1, 1.0), labT1,
+                      tblis_tensor(T2i), labT2,
+                      tblis_tensor(S, 0.0), labR)
+
+    return nothing
+end
+
 # ComplexF32 repeats the same pattern. Currently not implemented
 # (no benchmark demand); add when needed.
