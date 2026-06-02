@@ -51,11 +51,11 @@ has_tblis && println("TBLIS threads:  $(TBLIS.get_num_threads())")
 # Total: 10 blocks, dim=1000
 
 const BLOCK_SPEC = [
-    QN(0) => 20, QN(0) => 10,
-    QN(1) => 10, QN(1) => 10,
-    QN(-1) => 10, QN(-1) => 10,
-    QN(2) => 10, QN(2) => 5,
-    QN(-2) => 10, QN(-2) => 5,
+    QN(0) => 200, QN(0) => 100,
+    QN(1) => 100, QN(1) => 100,
+    QN(-1) => 100, QN(-1) => 100,
+    QN(2) => 100, QN(2) => 50,
+    QN(-2) => 100, QN(-2) => 50,
 ]
 
 const i = Index(BLOCK_SPEC, "i")
