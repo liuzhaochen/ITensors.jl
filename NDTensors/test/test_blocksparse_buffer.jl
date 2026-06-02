@@ -229,15 +229,20 @@ using TBLIS
 
     @testset "permutedims of buffer-backed BlockSparse" begin
         locs = [(1, 2), (2, 1)]; indsA = ([2, 3], [4, 5])
-        A = BlockSparseTensor{Float64}(locs, indsA...)
+        A_heap = BlockSparseTensor{Float64}(locs, indsA...)
+        d = data(storage(A_heap)); for i in eachindex(d); d[i] = randn(); end
+        T_heap = tensor(storage(A_heap), inds(A_heap))
+        Tp_ref = NDTensors.permutedims(T_heap, (2, 1))
         buf = Bumper.SlabBuffer()
         with_alloc_buffer(buf) do
-            s = BlockSparse(Float64, buf, blockoffsets(A), nnz(A))
-            d = data(s); for i in eachindex(d); d[i] = randn(); end
-            T = tensor(s, inds(A))
+            s = BlockSparse(Float64, buf, blockoffsets(A_heap), nnz(A_heap))
+            d = data(s); for i in eachindex(d); d[i] = data(storage(A_heap))[i]; end
+            T = tensor(s, inds(A_heap))
             Tp = NDTensors.permutedims(T, (2, 1))
             @test data(storage(Tp)) isa NDTensors.UnsafeArray
             @test nnz(T) == nnz(Tp)
+            # Verify correctness: buffer permutedims matches heap
+            @test dense(Tp) ≈ dense(Tp_ref)
         end
     end
 

@@ -242,6 +242,22 @@ using Test: @test, @testset
         end
     end
 
+    @testset "permutedims buffer matches heap reference" begin
+        h = NDTensors.tensor(NDTensors.Dense(randn(6)), (2, 3))
+        hp = NDTensors.permutedims(h, (2, 1))
+        buf = NDTensors.Bumper.SlabBuffer()
+        with_alloc_buffer(buf) do
+            a = NDTensors.to_buffer(h, buf)
+            ap = NDTensors.permutedims(a, (2, 1))
+            @test data(ap) isa NDTensors.UnsafeArray
+            @test size(ap) == size(hp)
+            ap_h = copy(ap)
+            for i in 1:length(ap_h)
+                @test ap_h[i] ≈ hp[i]
+            end
+        end
+    end
+
     @testset "Buffer-allocated element-wise operations" begin
         buf = NDTensors.Bumper.SlabBuffer()
         with_alloc_buffer(buf) do
