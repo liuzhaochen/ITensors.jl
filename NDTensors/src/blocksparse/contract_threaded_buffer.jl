@@ -16,6 +16,20 @@
 
 using .Expose: expose
 
+# Module-level lazy cache for TBLIS extension (avoids dictionary lookup per block)
+const _TBLIS_EXT_BUFFER = Ref{Union{Nothing, Module}}(nothing)
+
+function _get_tblis_ext_buf()
+    ext = _TBLIS_EXT_BUFFER[]
+    if ext === nothing
+        if isdefined(Base, :get_extension)
+            ext = Base.get_extension(@__MODULE__, :NDTensorsTBLISExt)
+        end
+        _TBLIS_EXT_BUFFER[] = ext
+    end
+    return ext
+end
+
 # ===================================================================
 # Main per-block dispatch
 # ===================================================================
@@ -35,10 +49,9 @@ function _block_contract!(R_block, labelsR, t1_block, labels1, t2_block, labels2
                           scratch=nothing)
     ElR = eltype(R_block)
 
-    _has_tblis = isdefined(Base, :get_extension) &&
-                 Base.get_extension(@__MODULE__, :NDTensorsTBLISExt) !== nothing
+    _has_tblis = _get_tblis_ext_buf() !== nothing
 
-    # --- ComplexF64: 4/2-real TBLIS with pre-allocated scratch ---
+    # --- ComplexF64: 4-real TBLIS with pre-allocated scratch ---
     if ElR <: ComplexF64 && scratch !== nothing
         _has_tblis || error(
             "TBLIS extension not loaded for buffer-threaded " *
@@ -96,33 +109,27 @@ D, S are pre-allocated Float64 arrays (from buffer or heap).
 """
 function _block_contract_complex!(R_block, labelsR, t1_block, labels1,
                                    t2_block, labels2, α, β, D, S)
-    # Call the extension's 4-real computation
-    ext = Base.get_extension(@__MODULE__, :NDTensorsTBLISExt)
+    ext = _get_tblis_ext_buf()
     ext.tblis_compute_4real!(D, S, t1_block, labels1, t2_block, labels2, labelsR)
 
     # Combine D, S into the complex output with α, β
-    # Rr_new = αr*D - αi*S + βr*Rr_old - βi*Ri_old
-    # Ri_new = αi*D + αr*S + βr*Ri_old + βi*Rr_old
-    N = ndims(R_block)
-    aR = array(R_block)
-    if ndims(aR) != N
-        tdims = ntuple(d -> dim(R_block, d), Val(N))
-        aR = Base.unsafe_wrap(Array{ComplexF64}, pointer(aR), tdims; own=false)
-    end
+    # all three arrays (D, S, aR_1d) share the same linear layout,
+    # so 1D indexing avoids wrapping the UnsafeArray
+    aR_1d = array(R_block)
 
     αr, αi = reim(α)
     βr, βi = reim(β)
 
     if iszero(βr) && iszero(βi)
-        @inbounds for i in CartesianIndices(D)
+        @inbounds for i in eachindex(D)
             d, s = D[i], S[i]
-            aR[i] = ComplexF64(αr * d - αi * s, αi * d + αr * s)
+            aR_1d[i] = ComplexF64(αr * d - αi * s, αi * d + αr * s)
         end
     else
-        @inbounds for i in CartesianIndices(D)
+        @inbounds for i in eachindex(D)
             d, s = D[i], S[i]
-            rr_old, ri_old = reim(aR[i])
-            aR[i] = ComplexF64(
+            rr_old, ri_old = reim(aR_1d[i])
+            aR_1d[i] = ComplexF64(
                 αr * d - αi * s + βr * rr_old - βi * ri_old,
                 αi * d + αr * s + βr * ri_old + βi * rr_old
             )
@@ -166,7 +173,7 @@ function contract!(
     executor = (using_threaded_blocksparse() && Threads.nthreads() > 1) ?
                ThreadedEx() : SequentialEx()
 
-    Folds.foreach(values(grouped), executor) do group
+    Folds.foreach(grouped.values, executor) do group
         β = zero(eltype(R))
         first_contraction = first(group)
         scratch = scratch_map === nothing ? nothing :
@@ -206,12 +213,12 @@ here because this runs single-threaded, before @spawn).
 Returns a Dict{Block{NR}, Tuple{Array{Float64}, Array{Float64}}} or
 `nothing` if no scratch is needed.
 """
-function _prealloc_complex_scratch(R::BlockSparseTensor{ElR}, grouped) where {ElR}
+function _prealloc_complex_scratch(R::BlockSparseTensor{ElR, NR}, grouped) where {ElR, NR}
     ElR <: ComplexF64 || return nothing
     buf = get_alloc_buffer()
     buf === nothing && return nothing
 
-    scratch = Dict{Any, Tuple{Any, Any}}()
+    scratch = Dict{Block{NR}, Tuple{Array{Float64}, Array{Float64}}}()
     for (blockR, group) in zip(keys(grouped), values(grouped))
         isempty(group) && continue
         R_block = R[blockR]
