@@ -138,9 +138,10 @@ end
 """
     contract!(R::BlockSparseTensor{..., BlockSparse{..., UnsafeArray, ...}}, ...)
 
-Override for buffer-backed BlockSparse contraction. When threading is
-enabled, pre-allocates scratch arrays from the buffer (single-threaded,
-safe) then distributes work across `@spawn` tasks.
+Override for buffer-backed BlockSparse contraction. Pre-allocates ComplexF64
+scratch arrays from the buffer (single-threaded), then dispatches per-block
+contractions through `_block_contract!` (direct TBLIS, zero-alloc). Uses
+`Folds.foreach` with `ThreadedEx`/`SequentialEx` parallel execution.
 """
 function contract!(
     R::BlockSparseTensor{ElR, NR, <:Any, <:BlockSparse{ElR, <:UnsafeArray{ElR, 1}, NR}},
@@ -155,26 +156,44 @@ function contract!(
         return R
     end
 
-    if using_threaded_blocksparse() && Threads.nthreads() > 1
-        # Group contractions by output block (same logic as contract_generic.jl)
-        grouped = map(_ -> empty(contraction_plan), eachnzblock(R))
-        for bc in contraction_plan
-            push!(grouped[last(bc)], bc)
+    # Group contractions by output block (same logic as contract_generic.jl)
+    grouped = map(_ -> empty(contraction_plan), eachnzblock(R))
+    for bc in contraction_plan
+        push!(grouped[last(bc)], bc)
+    end
+
+    scratch_map = _prealloc_complex_scratch(R, grouped)
+    executor = (using_threaded_blocksparse() && Threads.nthreads() > 1) ?
+               ThreadedEx() : SequentialEx()
+
+    Folds.foreach(values(grouped), executor) do group
+        β = zero(eltype(R))
+        first_contraction = first(group)
+        scratch = scratch_map === nothing ? nothing :
+                  get(scratch_map, last(first_contraction), nothing)
+        for bc in group
+            blocktensor1, blocktensor2, blockR = bc
+            α = compute_alpha(
+                eltype(R), labelsR, blockR, inds(R),
+                labelstensor1, blocktensor1, inds(tensor1),
+                labelstensor2, blocktensor2, inds(tensor2)
+            )
+            _block_contract!(
+                R[blockR], labelsR,
+                tensor1[blocktensor1], labelstensor1,
+                tensor2[blocktensor2], labelstensor2,
+                α, β, scratch,
+            )
+            if iszero(β)
+                β = one(eltype(R))
+            end
         end
-        _contract_buffer_threaded!(
-            R, labelsR, tensor1, labelstensor1, tensor2, labelstensor2, grouped
-        )
-    else
-        contract!(
-            R, labelsR, tensor1, labelstensor1, tensor2, labelstensor2,
-            contraction_plan, SequentialEx()
-        )
     end
     return R
 end
 
 # ===================================================================
-# Pre-allocate + parallel execution
+# Pre-allocate complex scratch
 # ===================================================================
 
 """
@@ -206,93 +225,3 @@ function _prealloc_complex_scratch(R::BlockSparseTensor{ElR}, grouped) where {El
     return length(scratch) > 0 ? scratch : nothing
 end
 
-"""
-    _contract_buffer_threaded!(R, labelsR, t1, lt1, t2, lt2, grouped)
-
-Execute grouped block contractions in parallel. Pre-allocates complex
-scratch arrays before spawning tasks.
-"""
-function _contract_buffer_threaded!(
-    R::BlockSparseTensor,
-    labelsR,
-    tensor1::BlockSparseTensor,
-    labelstensor1,
-    tensor2::BlockSparseTensor,
-    labelstensor2,
-    grouped
-)
-    n = Threads.nthreads()
-    n_groups = length(grouped)
-    n_groups == 0 && return nothing
-
-    # Pre-allocate complex scratch from buffer (single-threaded, safe)
-    scratch_map = _prealloc_complex_scratch(R, grouped)
-
-    # Chunk the groups across threads.
-    group_vals = collect(values(grouped))
-    chunk_size = cld(n_groups, n)
-    chunks = [
-        group_vals[i:min(i + chunk_size - 1, n_groups)]
-        for i in 1:chunk_size:n_groups
-    ]
-
-    tasks = map(chunks) do chunk
-        Threads.@spawn _execute_chunk!(
-            R, labelsR, tensor1, labelstensor1, tensor2, labelstensor2,
-            chunk, scratch_map,
-        )
-    end
-
-    for t in tasks
-        fetch(t)
-    end
-    return nothing
-end
-
-"""
-    _execute_chunk!(R, labelsR, t1, lt1, t2, lt2, groups, scratch_map=nothing)
-
-Process a chunk of contraction groups sequentially on one task.
-Each group reduces into one output block (β-flip).
-"""
-function _execute_chunk!(
-    R::BlockSparseTensor,
-    labelsR,
-    tensor1::BlockSparseTensor,
-    labelstensor1,
-    tensor2::BlockSparseTensor,
-    labelstensor2,
-    groups,
-    scratch_map=nothing,
-)
-    for contraction_plan_group in groups
-        β = zero(eltype(R))
-
-        # Look up scratch for this output block
-        first_contraction = first(contraction_plan_group)
-        scratch = scratch_map === nothing ? nothing :
-                  get(scratch_map, last(first_contraction), nothing)
-
-        for block_contraction in contraction_plan_group
-            blocktensor1, blocktensor2, blockR = block_contraction
-
-            α = compute_alpha(
-                eltype(R), labelsR, blockR, inds(R),
-                labelstensor1, blocktensor1, inds(tensor1),
-                labelstensor2, blocktensor2, inds(tensor2)
-            )
-
-            _block_contract!(
-                R[blockR], labelsR,
-                tensor1[blocktensor1], labelstensor1,
-                tensor2[blocktensor2], labelstensor2,
-                α, β, scratch,
-            )
-
-            if iszero(β)
-                β = one(eltype(R))
-            end
-        end
-    end
-    return nothing
-end
