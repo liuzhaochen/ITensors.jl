@@ -73,6 +73,16 @@ function copy(B::BlockSparse{ElT, <:UnsafeArray}) where {ElT}
     return BlockSparse(copy(Vector(data(B))), copy(blockoffsets(B)))
 end
 
+function copy(D::DiagBlockSparse{ElT, <:UnsafeArray}) where {ElT}
+    buf = get_alloc_buffer()
+    if buf !== nothing
+        new_data = Bumper.alloc!(buf, ElT, length(data(D)))
+        copyto!(new_data, data(D))
+        return DiagBlockSparse(new_data, copy(diagblockoffsets(D)))
+    end
+    return DiagBlockSparse(copy(Vector(data(D))), copy(diagblockoffsets(D)))
+end
+
 function Base.conj(::AllowAlias, B::BlockSparse{ElT, <:UnsafeArray}) where {ElT}
     buf = get_alloc_buffer()
     if buf === nothing

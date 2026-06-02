@@ -185,6 +185,7 @@ function tblis_compute_4real!(
     labelsR,
 )
     aT2 = _tblis_strided_array(T2)
+    aT1 = _tblis_strided_array(T1)
     T2r, T2i = _real_imag_views(aT2)
 
     labT1 = _tblis_labels(labelsT1)
@@ -192,11 +193,11 @@ function tblis_compute_4real!(
     labR = _tblis_labels(labelsR)
 
     # D = T1·T2r (overwrite)
-    tblis_tensor_mult(tblis_tensor(T1, 1.0), labT1,
+    tblis_tensor_mult(tblis_tensor(aT1, 1.0), labT1,
                       tblis_tensor(T2r), labT2,
                       tblis_tensor(D, 0.0), labR)
     # S = T1·T2i (overwrite)
-    tblis_tensor_mult(tblis_tensor(T1, 1.0), labT1,
+    tblis_tensor_mult(tblis_tensor(aT1, 1.0), labT1,
                       tblis_tensor(T2i), labT2,
                       tblis_tensor(S, 0.0), labR)
 

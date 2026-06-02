@@ -276,20 +276,15 @@ using Test: @test, @testset
                 a[i, i] = Float64(4 - i + 1)
             end
             U, S, V = svd(a)
+            # Now fall back to heap decompositions (SVD not hot in DMRG)
             @test size(U) == (5, 3)
             @test size(S) == (3, 3)
             @test size(V) == (3, 3)
             @test eltype(U) == Float64
             @test eltype(V) == Float64
-            # Buffer-backed outputs (decompositions_buffer.jl)
-            @test NDTensors.data(NDTensors.storage(U)) isa NDTensors.UnsafeArray
-            @test NDTensors.data(NDTensors.storage(V)) isa NDTensors.UnsafeArray
-            @test NDTensors.data(NDTensors.storage(S)) isa NDTensors.UnsafeArray
             # Verify reconstruction: A = U * S * V' via tensor contractions
             US = contract(U, (1, -1), S, (-1, 2))
-            @test NDTensors.data(NDTensors.storage(US)) isa NDTensors.UnsafeArray
             USV = contract(US, (1, -1), V, (2, -1))
-            @test NDTensors.data(NDTensors.storage(USV)) isa NDTensors.UnsafeArray
             @test USV ≈ a
         end
     end
@@ -305,8 +300,7 @@ using Test: @test, @testset
             @test size(V) == (3, 4, 2)
             @test eltype(U) == Float64
             @test eltype(V) == Float64
-            @test NDTensors.data(NDTensors.storage(U)) isa NDTensors.UnsafeArray
-            @test NDTensors.data(NDTensors.storage(V)) isa NDTensors.UnsafeArray
+            # U, V are heap-backed (SVD falls back to heap)
         end
     end
 
@@ -322,8 +316,7 @@ using Test: @test, @testset
             @test eltype(Q) == Float64
             @test eltype(R) == Float64
             @test Array(Q) * Array(R) ≈ Array(a)
-            @test NDTensors.data(NDTensors.storage(Q)) isa NDTensors.UnsafeArray
-            @test NDTensors.data(NDTensors.storage(R)) isa NDTensors.UnsafeArray
+            # Q, R are heap-backed (QR falls back to heap)
         end
     end
 
@@ -337,8 +330,7 @@ using Test: @test, @testset
             @test size(R) == (2, 3, 4)
             @test eltype(Q) == Float64
             @test eltype(R) == Float64
-            @test NDTensors.data(NDTensors.storage(Q)) isa NDTensors.UnsafeArray
-            @test NDTensors.data(NDTensors.storage(R)) isa NDTensors.UnsafeArray
+            # Q, R are heap-backed (QR falls back to heap)
         end
     end
 

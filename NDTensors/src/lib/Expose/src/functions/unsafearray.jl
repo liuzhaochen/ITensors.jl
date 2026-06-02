@@ -16,8 +16,8 @@ function mul!(
 end
 
 function permutedims(E::Exposed{<:UnsafeArray}, perm)
-    Strided.@strided Mperm = permutedims(unexpose(E), perm)
-    return Mperm
+    a_src = unexpose(E)
+    return Base.permutedims(a_src, perm)
 end
 
 function permutedims!(
@@ -25,7 +25,11 @@ function permutedims!(
 )
     a_dest = unexpose(Edest)
     a_src = unexpose(Esrc)
-    Strided.@strided a_dest .= permutedims(a_src, perm)
+    N = length(perm)
+    for I in CartesianIndices(a_src)
+        J = CartesianIndex(ntuple(i -> I[perm[i]], Val(N)))
+        a_dest[J] = a_src[I]
+    end
     return a_dest
 end
 
@@ -34,6 +38,11 @@ function permutedims!(
 )
     a_dest = unexpose(Edest)
     a_src = unexpose(Esrc)
-    Strided.@strided a_dest .= f.(a_dest, permutedims(a_src, perm))
+    ip = Base.invperm(perm)
+    N = length(perm)
+    for J in CartesianIndices(a_dest)
+        I = CartesianIndex(ntuple(i -> J[ip[i]], Val(N)))
+        a_dest[J] = f(a_dest[J], a_src[I])
+    end
     return a_dest
 end

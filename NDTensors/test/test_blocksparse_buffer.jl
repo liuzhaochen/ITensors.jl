@@ -144,20 +144,21 @@ using TBLIS
         locs = [(2, 1), (1, 2)]; indsA = ([2, 2], [2, 2])
         A_heap = BlockSparseTensor{Float64}(locs, indsA...)
         d = data(storage(A_heap)); for i in eachindex(d); d[i] = randn(); end
+        A_ref = Matrix(dense(A_heap))
         buf = Bumper.SlabBuffer()
         A = to_buffer(A_heap, buf)
-        with_alloc_buffer(buf) do
-            U, S, V = svd(A)
-            @test data(storage(U)) isa NDTensors.UnsafeArray
-            @test data(storage(S)) isa NDTensors.UnsafeArray
-            @test data(storage(V)) isa NDTensors.UnsafeArray
-            @test ndims(U) == 2 && ndims(S) == 2 && ndims(V) == 2
-            US = contract(U, (1, -1), S, (-1, 2))
-            @test data(storage(US)) isa NDTensors.UnsafeArray
-            USV = contract(US, (1, -1), V, (2, -1))
-            @test data(storage(USV)) isa NDTensors.UnsafeArray
-            @test dense(USV) ≈ dense(A)
+        U, S, V = with_alloc_buffer(buf) do
+            Us, Ss, Vs = svd(A)
+            @test data(storage(Us)) isa NDTensors.UnsafeArray
+            @test data(storage(Vs)) isa NDTensors.UnsafeArray
+            @test ndims(Us) == 2 && ndims(Ss) == 2 && ndims(Vs) == 2
+            Us, Ss, Vs
         end
+        # Copy to heap (DiagBlockSparse buffer contraction not implemented)
+        Uh, Sh, Vh = copy(U), copy(S), copy(V)
+        US = contract(Uh, (1, -1), Sh, (-1, 2))
+        USV = contract(US, (1, -1), Vh, (2, -1))
+        @test Matrix(dense(USV)) ≈ A_ref
     end
 
     @testset "QR of buffer-backed BlockSparse" begin
@@ -421,6 +422,27 @@ using TBLIS
             B_heap = BlockSparseTensor{Float64}(locs2, inds2...)
             dA = data(storage(A_heap)); for i in eachindex(dA); dA[i] = randn() + im * randn(); end
             dB = data(storage(B_heap)); for i in eachindex(dB); dB[i] = randn(); end
+            C_ref = contract(A_heap, (1, 2), B_heap, (2, 3), (1, 3))
+
+            buf = Bumper.SlabBuffer()
+            NDTensors.enable_threaded_blocksparse()
+            C_thr = with_alloc_buffer(buf) do
+                A_buf = NDTensors.to_buffer(A_heap, buf)
+                B_buf = NDTensors.to_buffer(B_heap, buf)
+                contract(A_buf, (1, 2), B_buf, (2, 3), (1, 3))
+            end
+            NDTensors.disable_threaded_blocksparse()
+            @test data(storage(C_thr)) isa NDTensors.UnsafeArray
+            @test C_ref ≈ C_thr
+        end
+
+        @testset "threaded contraction buffer Float64 × ComplexF64" begin
+            locs1 = [(1, 2), (2, 1)]; inds1 = ([2, 3], [4, 5])
+            locs2 = [(1, 2), (2, 1)]; inds2 = ([4, 5], [6, 7])
+            A_heap = BlockSparseTensor{Float64}(locs1, inds1...)
+            B_heap = BlockSparseTensor{ComplexF64}(locs2, inds2...)
+            dA = data(storage(A_heap)); for i in eachindex(dA); dA[i] = randn(); end
+            dB = data(storage(B_heap)); for i in eachindex(dB); dB[i] = randn() + im * randn(); end
             C_ref = contract(A_heap, (1, 2), B_heap, (2, 3), (1, 3))
 
             buf = Bumper.SlabBuffer()

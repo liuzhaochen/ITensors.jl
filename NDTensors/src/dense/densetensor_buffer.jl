@@ -33,3 +33,4 @@ function to_buffer(T::DenseTensor{ElT, N}, buf::AllocBuffer) where {ElT, N}
     copyto!(buf_data, d)
     return tensor(Dense{ElT, typeof(buf_data)}(buf_data), inds(T))
 end
+

@@ -59,8 +59,6 @@ include("dense/densetensor_buffer.jl")
 include("tensorstorage/tensorstorage_buffer.jl")
 # [FORK] Buffer-aware Tensor constructors (needs Dense defined first)
 include("tensor/tensor_buffer.jl")
-# [FORK] Buffer-aware SVD/QR for UnsafeArray-backed DenseTensors
-include("dense/linearalgebra/decompositions_buffer.jl")
 include("diag/diag.jl")
 # [FORK] Buffer-aware Diag + promote_rule for UniformDiag * Dense{UnsafeArray}
 include("diag/diag_buffer.jl")
