@@ -234,22 +234,24 @@ function contract!(
 
     # Type-specific dispatch — compile-time via ElR
     if ElR <: LinearAlgebra.BlasReal
-        _get_tblis_ext_buf() === nothing && error(
-            "TBLIS extension not loaded for buffer-threaded " *
-            "BlockSparse contraction. Use `using TBLIS`."
-        )
-        _contract_blasreal!(R, labelsR, tensor1, labelstensor1,
-                            tensor2, labelstensor2, grouped, executor)
+        if _get_tblis_ext_buf() === nothing
+            _contract_fallback!(R, labelsR, tensor1, labelstensor1,
+                                tensor2, labelstensor2, grouped, executor)
+        else
+            _contract_blasreal!(R, labelsR, tensor1, labelstensor1,
+                                tensor2, labelstensor2, grouped, executor)
+        end
     elseif ElR <: ComplexF64
         ext = _get_tblis_ext_buf()
-        ext === nothing && error(
-            "TBLIS extension not loaded for buffer-threaded " *
-            "BlockSparse ComplexF64 contraction. Use `using TBLIS`."
-        )
-        scratch_map = _prealloc_complex_scratch(R, grouped)
-        _contract_complexf64!(R, labelsR, tensor1, labelstensor1,
-                              tensor2, labelstensor2, grouped, executor,
-                              ext, scratch_map)
+        if ext === nothing
+            _contract_fallback!(R, labelsR, tensor1, labelstensor1,
+                                tensor2, labelstensor2, grouped, executor)
+        else
+            scratch_map = _prealloc_complex_scratch(R, grouped)
+            _contract_complexf64!(R, labelsR, tensor1, labelstensor1,
+                                  tensor2, labelstensor2, grouped, executor,
+                                  ext, scratch_map)
+        end
     else
         _contract_fallback!(R, labelsR, tensor1, labelstensor1,
                             tensor2, labelstensor2, grouped, executor)
