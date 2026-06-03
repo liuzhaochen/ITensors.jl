@@ -153,12 +153,23 @@ function _contract_fallback!(R, labelsR, tensor1, labelstensor1,
             R_block = R[blockR]
             t1_block = tensor1[blocktensor1]
             t2_block = tensor2[blocktensor2]
+            # Copy buffer-backed block data to heap-backed tensors so
+            # permutedims/similar inside contract! can allocate on heap
+            # (the buffer is disabled to avoid multi-threaded alloc!).
+            t1_h = tensor(
+                Dense(Vector(data(storage(t1_block)))),
+                inds(t1_block),
+            )
+            t2_h = tensor(
+                Dense(Vector(data(storage(t2_block)))),
+                inds(t2_block),
+            )
             prev = get_alloc_buffer()
             set_alloc_buffer!(nothing)
             try
                 contract!(expose(R_block), labelsR,
-                          expose(t1_block), labelstensor1,
-                          expose(t2_block), labelstensor2, α, β)
+                          expose(t1_h), labelstensor1,
+                          expose(t2_h), labelstensor2, α, β)
             finally
                 set_alloc_buffer!(prev)
             end
