@@ -12,22 +12,22 @@
 using ITensors
 using ITensors: to_buffer
 using NDTensors: Bumper, with_alloc_buffer
-using NDTensors: enable_threaded_blocksparse, disable_threaded_blocksparse
+using ITensors: enable_threaded_blocksparse, disable_threaded_blocksparse
 using LinearAlgebra, BenchmarkTools
 
 BLAS.set_num_threads(1)
 ITensors.NDTensors.Strided.disable_threads()
 
 # Trigger TBLIS extension loading if available
-isdefined(Base, :get_extension) || error("Julia 1.10+ required")
-try
-    Base.get_extension(ITensors.NDTensors, :NDTensorsTBLISExt) === nothing && @eval import TBLIS
-catch
-end
-has_tblis = Base.get_extension(ITensors.NDTensors, :NDTensorsTBLISExt) !== nothing
-if has_tblis
-    try TBLIS.set_num_threads(1) catch end
-end
+# isdefined(Base, :get_extension) || error("Julia 1.10+ required")
+# try
+#     Base.get_extension(ITensors.NDTensors, :NDTensorsTBLISExt) === nothing && @eval import TBLIS
+# catch
+# end
+# has_tblis = Base.get_extension(ITensors.NDTensors, :NDTensorsTBLISExt) !== nothing
+# if has_tblis
+#     try TBLIS.set_num_threads(1) catch end
+# end
 
 const NTHREADS = Threads.nthreads()
 println("="^70)
@@ -36,8 +36,9 @@ println("="^70)
 println("Julia threads:  $NTHREADS")
 println("BLAS threads:   $(BLAS.get_num_threads())")
 println("Strided threads: $(ITensors.NDTensors.Strided.get_num_threads())")
-println("TBLIS loaded:   $has_tblis")
-has_tblis && println("TBLIS threads:  $(TBLIS.get_num_threads())")
+@show ITensors.NDTensors._get_tblis_ext_buf()
+# println("TBLIS loaded:   $has_tblis")
+# has_tblis && println("TBLIS threads:  $(TBLIS.get_num_threads())")
 
 # ---------------------------------------------------------------------------
 # QN Index setup: 5 QN sectors, DMRG-like dimensions
@@ -205,8 +206,8 @@ println("\n" * "="^70)
 println("Scalar Contraction (inner product, 3D×3D→0D)")
 println("="^70)
 
-A3d = random_itensor(QN(0), i, dag(j), k)
-B3d = random_itensor(QN(0), i, dag(j), k)  # same indices for inner()
+A3d = random_itensor(QN(0), i, dag(j))
+B3d = random_itensor(QN(0), i, dag(j))  # same indices for inner()
 
 println("\nCorrectness:")
 C_ref = inner(A3d, B3d)
@@ -230,15 +231,15 @@ println("  inner(buffer_threaded):   ", isapprox(C_ref, C_buf_scalar_thr))
 println("\nBenchmark:")
 
 function bench_scalar_seq()
-    A = random_itensor(QN(0), i, dag(j), k)
-    B = random_itensor(QN(0), i, dag(j), k)
+    A = random_itensor(QN(0), i, dag(j))
+    B = random_itensor(QN(0), i, dag(j))
     inner(A, B)
 end
 
 function bench_scalar_thr()
     enable_threaded_blocksparse()
-    A = random_itensor(QN(0), i, dag(j), k)
-    B = random_itensor(QN(0), i, dag(j), k)
+    A = random_itensor(QN(0), i, dag(j))
+    B = random_itensor(QN(0), i, dag(j))
     r = inner(A, B)
     disable_threaded_blocksparse()
     return r

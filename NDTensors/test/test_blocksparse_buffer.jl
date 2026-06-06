@@ -6,9 +6,10 @@ using Random: randn!
 using ITensors: QN, Index, random_itensor, dag, prime
 using Test: @test, @test_throws, @testset
 
-# Single-thread BLAS for nested threading (block-sparse outer + BLAS inner)
+# Single-thread BLAS + Strided for nested threading (block-sparse outer + inner)
 if Threads.nthreads() > 1
     BLAS.set_num_threads(1)
+    NDTensors.Strided.disable_threads()
 end
 
 @testset "BlockSparse buffer" begin
@@ -144,6 +145,63 @@ end
             @test data(storage(C)) isa NDTensors.UnsafeArray
             @test inds(C) == (inds1[1], inds2[2])
         end
+    end
+
+    # ── Sequential (unthreaded) fallback — swap/C-perm paths ──
+    @testset "fallback C-perm 2D swapped (unthreaded)" begin
+        locs1 = [(1, 2), (2, 1)]; inds1 = ([2, 3], [4, 5])
+        locs2 = [(1, 2), (2, 1)]; inds2 = ([4, 5], [6, 7])
+        A = BlockSparseTensor{Float64}(locs1, inds1...)
+        B = BlockSparseTensor{Float64}(locs2, inds2...)
+        dA = data(storage(A)); for i in eachindex(dA); dA[i] = randn(); end
+        dB = data(storage(B)); for i in eachindex(dB); dB[i] = randn(); end
+        C_ref = contract(A, (1, 2), B, (2, 3), (3, 1))
+        buf = Bumper.SlabBuffer()
+        C_buf = with_alloc_buffer(buf) do
+            Ab = NDTensors.to_buffer(A, buf)
+            Bb = NDTensors.to_buffer(B, buf)
+            contract(Ab, (1, 2), Bb, (2, 3), (3, 1))
+        end
+        @test data(storage(C_buf)) isa NDTensors.UnsafeArray
+        @test Matrix(dense(copy(C_ref))) ≈ Matrix(dense(copy(C_buf)))
+    end
+
+    @testset "fallback A-swap B-swap (unthreaded)" begin
+        locs1 = [(1, 1)]; inds1 = ([20], [10])
+        locs2 = [(1, 1)]; inds2 = ([30], [20])
+        A = BlockSparseTensor{Float64}(locs1, inds1...)
+        B = BlockSparseTensor{Float64}(locs2, inds2...)
+        dA = data(storage(A)); for i in eachindex(dA); dA[i] = randn(); end
+        dB = data(storage(B)); for i in eachindex(dB); dB[i] = randn(); end
+        C_ref = contract(A, (2, 1), B, (3, 2), (1, 3))
+        buf = Bumper.SlabBuffer()
+        C_buf = with_alloc_buffer(buf) do
+            Ab = NDTensors.to_buffer(A, buf)
+            Bb = NDTensors.to_buffer(B, buf)
+            contract(Ab, (2, 1), Bb, (3, 2), (1, 3))
+        end
+        @test data(storage(C_buf)) isa NDTensors.UnsafeArray
+        @test Matrix(dense(copy(C_ref))) ≈ Matrix(dense(copy(C_buf)))
+    end
+
+    @testset "fallback interleaved A-perm 3D×2D→3D (unthreaded)" begin
+        # A: (1,2,3), B: (2,4), R: (3,1,4)
+        # permA = [1,3,2] (non-trivial, non-swap), trivB, need_c_perm
+        locs3 = [(1, 1, 1)]; inds3 = ([2], [3], [4])
+        A = BlockSparseTensor{Float64}(locs3, inds3...)
+        d = data(storage(A)); d[1:24] .= randn(24)
+        locs2 = [(1, 1)]; inds2 = ([3], [5])
+        B = BlockSparseTensor{Float64}(locs2, inds2...)
+        d = data(storage(B)); d[1:15] .= randn(15)
+        C_ref = contract(A, (1, 2, 3), B, (2, 4), (3, 1, 4))
+        buf = Bumper.SlabBuffer()
+        C_buf = with_alloc_buffer(buf) do
+            Ab = NDTensors.to_buffer(A, buf)
+            Bb = NDTensors.to_buffer(B, buf)
+            contract(Ab, (1, 2, 3), Bb, (2, 4), (3, 1, 4))
+        end
+        @test data(storage(C_buf)) isa NDTensors.UnsafeArray
+        @test dense(copy(C_ref)) ≈ dense(copy(C_buf))
     end
 
     @testset "SVD of buffer-backed BlockSparse" begin
@@ -557,6 +615,90 @@ end
             @test dense(copy(C_ref)) ≈ dense(copy(C_thr))
         end
 
+        @testset "threaded contraction (fallback) A-swap 2D×2D→2D" begin
+            # A has (contracted, free) layout → swapA = true, BLAS 'T' flag
+            locs1 = [(1, 1)]; inds1 = ([20], [10])
+            locs2 = [(1, 1)]; inds2 = ([20], [30])
+            A = BlockSparseTensor{Float64}(locs1, inds1...)
+            B = BlockSparseTensor{Float64}(locs2, inds2...)
+            dA = data(storage(A)); for i in eachindex(dA); dA[i] = randn(); end
+            dB = data(storage(B)); for i in eachindex(dB); dB[i] = randn(); end
+            C_ref = contract(A, (2, 1), B, (2, 3), (1, 3))
+            buf = Bumper.SlabBuffer()
+            NDTensors.enable_threaded_blocksparse()
+            C_thr = with_alloc_buffer(buf) do
+                Ab = NDTensors.to_buffer(A, buf)
+                Bb = NDTensors.to_buffer(B, buf)
+                contract(Ab, (2, 1), Bb, (2, 3), (1, 3))
+            end
+            NDTensors.disable_threaded_blocksparse()
+            @test data(storage(C_thr)) isa NDTensors.UnsafeArray
+            @test Matrix(dense(copy(C_ref))) ≈ Matrix(dense(copy(C_thr)))
+        end
+
+        @testset "threaded contraction (fallback) B-swap 2D×2D→2D" begin
+            # B has (free, contracted) layout → swapB = true, BLAS 'T' flag
+            locs1 = [(1, 1)]; inds1 = ([10], [20])
+            locs2 = [(1, 1)]; inds2 = ([30], [20])
+            A = BlockSparseTensor{Float64}(locs1, inds1...)
+            B = BlockSparseTensor{Float64}(locs2, inds2...)
+            dA = data(storage(A)); for i in eachindex(dA); dA[i] = randn(); end
+            dB = data(storage(B)); for i in eachindex(dB); dB[i] = randn(); end
+            C_ref = contract(A, (1, 2), B, (3, 2), (1, 3))
+            buf = Bumper.SlabBuffer()
+            NDTensors.enable_threaded_blocksparse()
+            C_thr = with_alloc_buffer(buf) do
+                Ab = NDTensors.to_buffer(A, buf)
+                Bb = NDTensors.to_buffer(B, buf)
+                contract(Ab, (1, 2), Bb, (3, 2), (1, 3))
+            end
+            NDTensors.disable_threaded_blocksparse()
+            @test data(storage(C_thr)) isa NDTensors.UnsafeArray
+            @test Matrix(dense(copy(C_ref))) ≈ Matrix(dense(copy(C_thr)))
+        end
+
+        @testset "threaded contraction (fallback) A-swap B-swap" begin
+            # Both need 'T' flag: A=(2,1), B=(3,2) → swapA && swapB
+            locs1 = [(1, 1)]; inds1 = ([20], [10])
+            locs2 = [(1, 1)]; inds2 = ([30], [20])
+            A = BlockSparseTensor{Float64}(locs1, inds1...)
+            B = BlockSparseTensor{Float64}(locs2, inds2...)
+            dA = data(storage(A)); for i in eachindex(dA); dA[i] = randn(); end
+            dB = data(storage(B)); for i in eachindex(dB); dB[i] = randn(); end
+            C_ref = contract(A, (2, 1), B, (3, 2), (1, 3))
+            buf = Bumper.SlabBuffer()
+            NDTensors.enable_threaded_blocksparse()
+            C_thr = with_alloc_buffer(buf) do
+                Ab = NDTensors.to_buffer(A, buf)
+                Bb = NDTensors.to_buffer(B, buf)
+                contract(Ab, (2, 1), Bb, (3, 2), (1, 3))
+            end
+            NDTensors.disable_threaded_blocksparse()
+            @test data(storage(C_thr)) isa NDTensors.UnsafeArray
+            @test Matrix(dense(copy(C_ref))) ≈ Matrix(dense(copy(C_thr)))
+        end
+
+        @testset "threaded contraction (fallback) A-swap C-perm" begin
+            # swapA + need_c_perm: A=(2,1), C labels swapped
+            locs1 = [(1, 1)]; inds1 = ([20], [10])
+            locs2 = [(1, 1)]; inds2 = ([20], [30])
+            A = BlockSparseTensor{Float64}(locs1, inds1...)
+            B = BlockSparseTensor{Float64}(locs2, inds2...)
+            dA = data(storage(A)); for i in eachindex(dA); dA[i] = randn(); end
+            dB = data(storage(B)); for i in eachindex(dB); dB[i] = randn(); end
+            C_ref = contract(A, (2, 1), B, (2, 3), (3, 1))
+            buf = Bumper.SlabBuffer()
+            NDTensors.enable_threaded_blocksparse()
+            C_thr = with_alloc_buffer(buf) do
+                Ab = NDTensors.to_buffer(A, buf)
+                Bb = NDTensors.to_buffer(B, buf)
+                contract(Ab, (2, 1), Bb, (2, 3), (3, 1))
+            end
+            NDTensors.disable_threaded_blocksparse()
+            @test data(storage(C_thr)) isa NDTensors.UnsafeArray
+            @test Matrix(dense(copy(C_ref))) ≈ Matrix(dense(copy(C_thr)))
+        end
+
         @testset "threaded contraction (fallback) QN multi-contracted order" begin
             # Regression test: contracted indices in different order between
             # A and B (A: [-1,-2], B: [-2,-1]). Previous _contract_fallback!
@@ -606,9 +748,10 @@ using Test: @test, @testset
 using TBLIS
 
 @testset "BlockSparse buffer (TBLIS)" begin
-    # Single-thread BLAS for nested threading
+    # Single-thread BLAS + Strided for nested threading
     if Threads.nthreads() > 1
         BLAS.set_num_threads(1)
+        NDTensors.Strided.disable_threads()
     end
 
     # ── Multi-threaded contraction — TBLIS ──

@@ -8,14 +8,10 @@
 # which goes to DenseTensor _contract! → permutedims → similar → Bumper.alloc!.
 # Multiple threads calling Bumper.alloc! simultaneously corrupts the arena.
 #
-# This override replaces the per-block contract! with a buffer-safe wrapper:
-#   - Float32/Float64 → direct TBLIS (zero alloc, no permutedims).
-#   - ComplexF64      → 4-real TBLIS decomposition with pre-allocated
-#                        buffer scratch (D, S per output block).
-#   - Otherwise       → heap fallback (thread-safe, GC reclaims quickly).
-#
+# This override replaces Folds.jl with OhMyThreads.@tasks for lower overhead,
+# and dispatches per-block contractions through type-specific function barriers.
 # Each type family has its own function barrier to avoid Union types in the
-# Folds.foreach closure (which prevents Julia from inlining the per-block call).
+# parallel task body (which prevents Julia from inlining the per-block call).
 
 # Module-level lazy cache for TBLIS extension (avoids dictionary lookup per block)
 const _TBLIS_EXT_BUFFER = Ref{Union{Nothing, Module}}(nothing)
@@ -36,8 +32,10 @@ end
 # ===================================================================
 
 function _contract_blasreal!(R, labelsR, tensor1, labelstensor1,
-                              tensor2, labelstensor2, grouped, executor)
-    Folds.foreach(grouped.values, executor) do group
+                              tensor2, labelstensor2, grouped, threaded)
+    sched = threaded ? :dynamic : :serial
+    OhMyThreads.@allow_boxed_captures OhMyThreads.tforeach(
+        grouped.values; scheduler=sched) do group
         β = zero(eltype(R))
         for bc in group
             blocktensor1, blocktensor2, blockR = bc
@@ -108,9 +106,11 @@ function _block_contract_complex!(ext::Module, R_block, labelsR, t1_block, label
 end
 
 function _contract_complexf64!(R, labelsR, tensor1, labelstensor1,
-                                tensor2, labelstensor2, grouped, executor,
+                                tensor2, labelstensor2, grouped, threaded,
                                 ext::Module, scratch_map)
-    Folds.foreach(grouped.values, executor) do group
+    sched = threaded ? :dynamic : :serial
+    OhMyThreads.@allow_boxed_captures OhMyThreads.tforeach(
+        grouped.values; scheduler=sched) do group
         β = zero(eltype(R))
         scratch = scratch_map[last(first(group))]
         for bc in group
@@ -194,57 +194,42 @@ function _is_trivial_perm(p, n)
 end
 
 """
-    _scratch_to_c!(R_data, R_work, c_perm, c_sz, gemm_sz)
+    _is_block_swap(perm, nleft, nright)
 
-Copy BLAS gemm result from `R_work` (column-major in GEMM order) to
-`R_data` (column-major in C's natural order), applying the dimension
-permutation `c_perm`. Both are flat 1D arrays.
+Check if `perm` is a simple swap of two contiguous index blocks:
+`(block₁, block₂) → (block₂, block₁)`. `nleft` and `nright` are the sizes
+of the two blocks in the permuted order.
 
-`c_perm[d]` = position in GEMM order of C's d-th dimension. `gemm_sz` = dimension sizes in GEMM order.
+Example: perm = [3,4,1,2], nleft=2, nright=2 → true (blocks (1,2) and (3,4) swapped).
 """
-function _scratch_to_c!(R_data, R_work, c_perm, c_sz, gemm_sz, accumulate::Bool=false)
-    N = length(c_sz)
-    g_stride = ntuple(Val(N)) do i
-        i == 1 ? 1 : prod(gemm_sz[1:(i - 1)])
+function _is_block_swap(perm, nleft, nright)
+    for i in 1:nleft
+        perm[i] != nright + i && return false
     end
-    r_stride = ntuple(Val(N)) do i
-        i == 1 ? 1 : prod(c_sz[1:(i - 1)])
+    for i in 1:nright
+        perm[nleft + i] != i && return false
     end
-    if accumulate
-        @inbounds for c_idx in CartesianIndices(c_sz)
-            w_lin = 1
-            r_lin = 1
-            for d in 1:N
-                w_lin += (c_idx.I[d] - 1) * g_stride[c_perm[d]]
-                r_lin += (c_idx.I[d] - 1) * r_stride[d]
-            end
-            R_data[r_lin] += R_work[w_lin]
-        end
-    else
-        @inbounds for c_idx in CartesianIndices(c_sz)
-            w_lin = 1
-            r_lin = 1
-            for d in 1:N
-                w_lin += (c_idx.I[d] - 1) * g_stride[c_perm[d]]
-                r_lin += (c_idx.I[d] - 1) * r_stride[d]
-            end
-            R_data[r_lin] = R_work[w_lin]
-        end
-    end
-    return R_data
+    return true
 end
+
 
 """
     _contract_fallback!(R, labelsR, tensor1, labelstensor1, ...)
 
-Per-block direct BLAS gemm using libc-malloc'd temp caches.
-Each BC: ccall(:malloc) → copy block data with permutation →
-BLAS.gemm! into work scratch → transfer to R_block → ccall(:free).
+Per-block BLAS gemm with grow-as-needed scratch and deferred output
+permutation. For each output-block group:
+  1. Scratch for A/B allocated on first BC, grown if later BC needs more
+     (avoids pre-pass — single getindex per BC)
+  2. Deferred output permutedims! (once per group, if need_c_perm)
+  3. Free per-group scratch
+
+Zero-copy paths (trivA/trivB, swapA/swapB) are unchanged.
 No Bumper, no GC pressure.
 """
 function _contract_fallback!(R, labelsR, tensor1, labelstensor1,
-                              tensor2, labelstensor2, grouped, executor)
+                              tensor2, labelstensor2, grouped, threaded)
     ElR = eltype(R)
+    sched = threaded ? :dynamic : :serial
 
     # Hoist: dimension counts only depend on labels (same for all BCs)
     ndim1, ndim2 = length(labelstensor1), length(labelstensor2)
@@ -258,11 +243,6 @@ function _contract_fallback!(R, labelsR, tensor1, labelstensor1,
     permB = _contract_perm(labelstensor2, labelsR, :contracted_first)
 
     # Align contracted index ordering between A and B for GEMM consistency.
-    # BLAS.gemm! sums over the middle dimension by linear index, so A's
-    # contracted indices must appear in the same order as B's contracted
-    # indices. The upstream ContractionProperties machinery handles this
-    # via PA/PB construction; here we reorder permA's contracted portion
-    # to match B's order.
     if ncontA > 1
         contA = [labelstensor1[permA[nfreeA + i]] for i in 1:ncontA]
         contB = [labelstensor2[permB[i]] for i in 1:ncontB]
@@ -274,6 +254,10 @@ function _contract_fallback!(R, labelsR, tensor1, labelstensor1,
 
     trivA = _is_trivial_perm(permA, ndim1)
     trivB = _is_trivial_perm(permB, ndim2)
+
+    swapA = !trivA && ncontA > 0 && _is_block_swap(permA, nfreeA, ncontA)
+    swapB = !trivB && ncontB > 0 && _is_block_swap(permB, ncontB, nfreeB)
+
     permA_tup, permB_tup = Tuple(permA), Tuple(permB)
 
     # For output: R_work order = (A_free..., B_free...)  vs  labelsR order
@@ -284,7 +268,41 @@ function _contract_fallback!(R, labelsR, tensor1, labelstensor1,
     need_c_perm = any(i -> labelsR[i] != r_work_labels[i], 1:nRlabels)
     c_perm_tup = need_c_perm ? Tuple(findfirst(==(l), r_work_labels) for l in labelsR) : nothing
 
-    Folds.foreach(grouped.values, executor) do group
+    # Element type match is uniform across all blocks in a tensor (hoisted once)
+    same_type_A_all = eltype(tensor1) == ElR
+    same_type_B_all = eltype(tensor2) == ElR
+
+    OhMyThreads.@allow_boxed_captures OhMyThreads.tforeach(
+        grouped.values; scheduler=sched) do group
+        isempty(group) && return nothing
+
+        # Grow-as-needed scratch for A/B (no pre-pass — avoids double getindex)
+        A_ptr = C_NULL; A_cap = 0
+        B_ptr = C_NULL; B_cap = 0
+        need_A_scratch = (!(trivA || swapA) || !same_type_A_all)
+        need_B_scratch = (!(trivB || swapB) || !same_type_B_all)
+
+        # ---- Pre-compute output permutation metadata from first BC ----
+        if need_c_perm
+            first_bc = first(group)
+            blockR_first = last(first_bc)
+            R_block_perm = R[blockR_first]
+            R_data_perm = vec(array(R_block_perm))
+            R_block_nd_perm = reshape(R_data_perm,
+                ntuple(i -> size(R_block_perm, i), Val(nRlabels)))
+            bc_first = first(group)
+            t1_first = tensor1[bc_first[1]]
+            t2_first = tensor2[bc_first[2]]
+            gemm_sz = ntuple(Val(nRlabels)) do i
+                i <= nfreeA ? size(t1_first, permA[i]) :
+                              size(t2_first, permB[ncontB + i - nfreeA])
+            end
+            R_ptr = ccall(:malloc, Ptr{Cvoid}, (Csize_t,),
+                sizeof(ElR) * prod(ntuple(i -> size(R_block_perm, i), Val(nRlabels))))
+            R_scratch = Base.unsafe_wrap(Array{ElR}, Ptr{ElR}(R_ptr),
+                prod(ntuple(i -> size(R_block_perm, i), Val(nRlabels))); own=false)
+        end
+
         βflag = true
         for bc in group
             blocktensor1, blocktensor2, blockR = bc
@@ -303,74 +321,84 @@ function _contract_fallback!(R, labelsR, tensor1, labelstensor1,
             dright = prod(ntuple(i -> size(t2_block, permB[ncontB + i]), nfreeB))
             nA, nB, nR = dleft * dmid, dmid * dright, dleft * dright
 
-            # Allocate scratch (per BC: malloc/use/free, thread-safe)
-            A_ptr = ccall(:malloc, Ptr{Cvoid}, (Csize_t,), sizeof(ElR)*nA)
-            B_ptr = ccall(:malloc, Ptr{Cvoid}, (Csize_t,), sizeof(ElR)*nB)
-            R_ptr = ccall(:malloc, Ptr{Cvoid}, (Csize_t,), sizeof(ElR)*nR)
-
-            A_buf = Base.unsafe_wrap(Array{ElR}, Ptr{ElR}(A_ptr), nA; own=false)
-            B_buf = Base.unsafe_wrap(Array{ElR}, Ptr{ElR}(B_ptr), nB; own=false)
-            R_buf = Base.unsafe_wrap(Array{ElR}, Ptr{ElR}(R_ptr), nR; own=false)
-
-            # --- Input A: permute + reshape for GEMM ---
-            if trivA
-                copyto!(A_buf, vec(array(t1_block)))
+            # --- Input A: zero-copy or grow-as-needed scratch ---
+            tA = 'N'
+            if trivA && same_type_A_all
+                A_2d = Base.unsafe_wrap(
+                    Array{ElR}, pointer(data(storage(t1_block))),
+                    (dleft, dmid); own=false)
+            elseif swapA && same_type_A_all
+                A_2d = Base.unsafe_wrap(
+                    Array{ElR}, pointer(data(storage(t1_block))),
+                    (dmid, dleft); own=false)
+                tA = 'T'
             else
-                perm_sz = ntuple(d -> size(t1_block, permA[d]), Val(ndim1))
-                A_nd = reshape(A_buf, perm_sz)
-                permutedims!(A_nd, array(t1_block), permA_tup)
-            end
-            A_2d = reshape(A_buf, (dleft, dmid))
-
-            # --- Input B: permute + reshape for GEMM ---
-            if trivB
-                copyto!(B_buf, vec(array(t2_block)))
-            else
-                perm_sz = ntuple(d -> size(t2_block, permB[d]), Val(ndim2))
-                B_nd = reshape(B_buf, perm_sz)
-                permutedims!(B_nd, array(t2_block), permB_tup)
-            end
-            B_2d = reshape(B_buf, (dmid, dright))
-
-            # --- GEMM ---
-            R_2d = reshape(R_buf, (dleft, dright))
-            BLAS.gemm!('N', 'N', α, A_2d, B_2d, zero(ElR), R_2d)
-
-            # --- Output: copy R_buf → R_block (with perm if needed) ---
-            R_data = vec(array(R_block))
-            if need_c_perm
-                gemm_sz = ntuple(Val(nRlabels)) do i
-                    i <= nfreeA ? size(t1_block, permA[i]) :
-                                  size(t2_block, permB[ncontB + i - nfreeA])
+                if nA > A_cap
+                    A_cap > 0 && ccall(:free, Cvoid, (Ptr{Cvoid},), A_ptr)
+                    A_ptr = ccall(:malloc, Ptr{Cvoid}, (Csize_t,), sizeof(ElR) * nA)
+                    A_cap = nA
                 end
-                R_work_nd = reshape(R_buf, gemm_sz)
-                R_block_nd = reshape(R_data, ntuple(i -> size(R_block, i), Val(nRlabels)))
-                if βflag
-                    permutedims!(R_block_nd, R_work_nd, c_perm_tup)
+                A_buf = Base.unsafe_wrap(Array{ElR}, Ptr{ElR}(A_ptr), nA; own=false)
+                if trivA  # type mismatch only, layout is trivial
+                    copyto!(A_buf, vec(array(t1_block)))
                 else
-                    X_ptr = ccall(:malloc, Ptr{Cvoid}, (Csize_t,), sizeof(ElR)*nR)
-                    R_tmp = Base.unsafe_wrap(Array{ElR}, Ptr{ElR}(X_ptr), nR; own=false)
-                    R_tmp_nd = reshape(R_tmp, gemm_sz)
-                    permutedims!(R_tmp_nd, R_work_nd, c_perm_tup)
-                    for i in eachindex(R_data)
-                        R_data[i] += R_tmp[i]
-                    end
-                    ccall(:free, Cvoid, (Ptr{Cvoid},), X_ptr)
+                    _permuted_copyto!(A_buf, t1_block, permA_tup)
                 end
-            elseif βflag
-                copyto!(R_data, R_buf)
-            else
-                for i in eachindex(R_buf)
-                    R_data[i] += R_buf[i]
-                end
+                A_2d = reshape(A_buf, (dleft, dmid))
             end
-            # Free scratch
-            ccall(:free, Cvoid, (Ptr{Cvoid},), A_ptr)
-            ccall(:free, Cvoid, (Ptr{Cvoid},), B_ptr)
-            ccall(:free, Cvoid, (Ptr{Cvoid},), R_ptr)
+
+            # --- Input B: zero-copy or grow-as-needed scratch ---
+            tB = 'N'
+            if trivB && same_type_B_all
+                B_2d = Base.unsafe_wrap(
+                    Array{ElR}, pointer(data(storage(t2_block))),
+                    (dmid, dright); own=false)
+            elseif swapB && same_type_B_all
+                B_2d = Base.unsafe_wrap(
+                    Array{ElR}, pointer(data(storage(t2_block))),
+                    (dright, dmid); own=false)
+                tB = 'T'
+            else
+                if nB > B_cap
+                    B_cap > 0 && ccall(:free, Cvoid, (Ptr{Cvoid},), B_ptr)
+                    B_ptr = ccall(:malloc, Ptr{Cvoid}, (Csize_t,), sizeof(ElR) * nB)
+                    B_cap = nB
+                end
+                B_buf = Base.unsafe_wrap(Array{ElR}, Ptr{ElR}(B_ptr), nB; own=false)
+                if trivB  # type mismatch only, layout is trivial
+                    copyto!(B_buf, vec(array(t2_block)))
+                else
+                    _permuted_copyto!(B_buf, t2_block, permB_tup)
+                end
+                B_2d = reshape(B_buf, (dmid, dright))
+            end
+
+            # --- GEMM + Output ---
+            if !need_c_perm
+                R_2d = Base.unsafe_wrap(
+                    Array{ElR}, pointer(data(storage(R_block))),
+                    (dleft, dright); own=false)
+                BLAS.gemm!(tA, tB, α, A_2d, B_2d,
+                           βflag ? zero(ElR) : one(ElR), R_2d)
+            else
+                R_work = reshape(R_scratch, (dleft, dright))
+                BLAS.gemm!(tA, tB, α, A_2d, B_2d,
+                           βflag ? zero(ElR) : one(ElR), R_work)
+            end
             βflag = false
-        end  # for bc in group
-    end  # Folds.foreach
+        end
+
+        # ---- Deferred output permutation (once per group) ----
+        if need_c_perm
+            R_gemm_nd = reshape(R_scratch, gemm_sz)
+            permutedims!(R_block_nd_perm, R_gemm_nd, c_perm_tup)
+        end
+
+        # ---- Free per-group scratch ----
+        A_cap > 0 && ccall(:free, Cvoid, (Ptr{Cvoid},), A_ptr)
+        B_cap > 0 && ccall(:free, Cvoid, (Ptr{Cvoid},), B_ptr)
+        need_c_perm && ccall(:free, Cvoid, (Ptr{Cvoid},), R_ptr)
+    end
     return nothing
 end
 
@@ -433,32 +461,31 @@ function contract!(
         push!(grouped[last(bc)], bc)
     end
 
-    executor = (using_threaded_blocksparse() && Threads.nthreads() > 1) ?
-               ThreadedEx() : SequentialEx()
+    threaded = using_threaded_blocksparse() && Threads.nthreads() > 1
 
     # Type-specific dispatch — compile-time via ElR
     if ElR <: LinearAlgebra.BlasReal
         if _get_tblis_ext_buf() === nothing
             _contract_fallback!(R, labelsR, tensor1, labelstensor1,
-                                tensor2, labelstensor2, grouped, executor)
+                                tensor2, labelstensor2, grouped, threaded)
         else
             _contract_blasreal!(R, labelsR, tensor1, labelstensor1,
-                                tensor2, labelstensor2, grouped, executor)
+                                tensor2, labelstensor2, grouped, threaded)
         end
     elseif ElR <: ComplexF64
         ext = _get_tblis_ext_buf()
         if ext === nothing
             _contract_fallback!(R, labelsR, tensor1, labelstensor1,
-                                tensor2, labelstensor2, grouped, executor)
+                                tensor2, labelstensor2, grouped, threaded)
         else
             scratch_map = _prealloc_complex_scratch(R, grouped)
             _contract_complexf64!(R, labelsR, tensor1, labelstensor1,
-                                  tensor2, labelstensor2, grouped, executor,
+                                  tensor2, labelstensor2, grouped, threaded,
                                   ext, scratch_map)
         end
     else
         _contract_fallback!(R, labelsR, tensor1, labelstensor1,
-                            tensor2, labelstensor2, grouped, executor)
+                            tensor2, labelstensor2, grouped, threaded)
     end
     return R
 end

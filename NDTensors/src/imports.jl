@@ -11,6 +11,7 @@ using Folds
 using Functors
 using InlineStrings
 using LinearAlgebra
+using OhMyThreads
 using Random
 using SimpleTraits
 using SplitApplyCombine

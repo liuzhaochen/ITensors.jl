@@ -14,15 +14,15 @@ BLAS.set_num_threads(1)
 ITensors.NDTensors.Strided.disable_threads()
 
 # Trigger TBLIS extension loading if available
-isdefined(Base, :get_extension) || error("Julia 1.10+ required")
-try
-    Base.get_extension(ITensors.NDTensors, :NDTensorsTBLISExt) === nothing && @eval import TBLIS
-catch
-end
-has_tblis = Base.get_extension(ITensors.NDTensors, :NDTensorsTBLISExt) !== nothing
-if has_tblis
-    try TBLIS.set_num_threads(1) catch end
-end
+# isdefined(Base, :get_extension) || error("Julia 1.10+ required")
+# try
+#     Base.get_extension(ITensors.NDTensors, :NDTensorsTBLISExt) === nothing && @eval import TBLIS
+# catch
+# end
+# has_tblis = Base.get_extension(ITensors.NDTensors, :NDTensorsTBLISExt) !== nothing
+# if has_tblis
+#     try TBLIS.set_num_threads(1) catch end
+# end
 
 const NTHREADS = Threads.nthreads()
 println("="^70)
@@ -31,8 +31,8 @@ println("="^70)
 println("Julia threads:  $NTHREADS")
 println("BLAS threads:   $(BLAS.get_num_threads())")
 println("Strided threads: $(ITensors.NDTensors.Strided.get_num_threads())")
-println("TBLIS loaded:   $has_tblis")
-has_tblis && println("TBLIS threads:  $(TBLIS.get_num_threads())")
+# println("TBLIS loaded:   $has_tblis")
+# has_tblis && println("TBLIS threads:  $(TBLIS.get_num_threads())")
 
 # ---------------------------------------------------------------------------
 # QN Index setup: same structure as real benchmark
