@@ -31,33 +31,46 @@ Use Bumper.checkpoint_save/restore to manage the buffer region after LH,R.
 """
 function lanczos_permute(LH::ITensor, R::ITensor, ψ::ITensor,
                          buf::NDTensors.AllocBuffer)
-    # ── LH: free_first order ──
+    # ── LH: free_first order, contracted in ψ's order ──
     LH_inds = Tuple(inds(LH))
     ψ_inds = Tuple(inds(ψ))
     LH_free = filter(i -> !(i in ψ_inds), LH_inds)
-    LH_cont = filter(i -> i in ψ_inds, LH_inds)
+    # Contracted in ψ's index order so contA == contB (avoids alignment rewrite)
+    LH_cont = [LH_inds[findfirst(==(ci), LH_inds)] for ci in ψ_inds if ci in LH_inds]
     LH_target = (LH_free..., LH_cont...)
-    LH_perm = ntuple(length(LH_inds)) do d
-        findfirst(==(LH_inds[d]), LH_target)
+    # Perm: target→source (standard permutedims convention: new[i] = old[perm[i]])
+    LH_perm = ntuple(length(LH_target)) do i
+        findfirst(==(LH_target[i]), LH_inds)
     end
 
-    # ── R: cont_first order ──
+    # ── R: cont_first order, contracted in T's (int_inds) order ──
     ψ_unique = filter(i -> !(i in LH_inds), ψ_inds)
     int_inds = (LH_free..., ψ_unique...)
     R_inds = Tuple(inds(R))
-    R_cont = filter(i -> i in int_inds, R_inds)
+    # Contracted in int_inds order for contA/contB alignment with T
+    R_cont_parts = [R_inds[findfirst(==(ci), R_inds)] for ci in int_inds if ci in R_inds]
+    R_cont = (R_cont_parts...,)
     R_free = filter(i -> !(i in int_inds), R_inds)
     R_target = (R_cont..., R_free...)
-    R_perm = ntuple(length(R_inds)) do d
-        findfirst(==(R_inds[d]), R_target)
+    # Perm: target→source (standard permutedims convention)
+    R_perm = ntuple(length(R_target)) do i
+        findfirst(==(R_target[i]), R_inds)
     end
 
-    # ── Apply buffer-permuted copy ──
+    # ── Apply buffer copy (with perm for BlockSparse, plain for Dense) ──
     LH_nd = tensor(LH)
     R_nd = tensor(R)
     ψ_nd = tensor(ψ)
-    LH_b = NDTensors.to_buffer(LH_nd, LH_perm, buf)
-    R_b = NDTensors.to_buffer(R_nd, R_perm, buf)
+    LH_b = if NDTensors.storagetype(LH_nd) <: NDTensors.BlockSparse
+        NDTensors.to_buffer(LH_nd, LH_perm, buf)
+    else
+        NDTensors.to_buffer(LH_nd, buf)
+    end
+    R_b = if NDTensors.storagetype(R_nd) <: NDTensors.BlockSparse
+        NDTensors.to_buffer(R_nd, R_perm, buf)
+    else
+        NDTensors.to_buffer(R_nd, buf)
+    end
     ψ_b = NDTensors.to_buffer(ψ_nd, buf)
     return ITensor(NDTensors.AllowAlias(), LH_b),
            ITensor(NDTensors.AllowAlias(), R_b),

@@ -279,8 +279,7 @@ function _contract_fallback!(R, labelsR, tensor1, labelstensor1,
         # Grow-as-needed scratch for A/B (no pre-pass — avoids double getindex)
         A_ptr = C_NULL; A_cap = 0
         B_ptr = C_NULL; B_cap = 0
-        need_A_scratch = (!(trivA || swapA) || !same_type_A_all)
-        need_B_scratch = (!(trivB || swapB) || !same_type_B_all)
+        R_ptr = C_NULL
 
         # ---- Pre-compute output permutation metadata from first BC ----
         if need_c_perm
