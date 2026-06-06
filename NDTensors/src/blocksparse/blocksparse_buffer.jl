@@ -231,3 +231,31 @@ function to_buffer(T::BlockSparseTensor{ElT, N}, buf::AllocBuffer) where {ElT, N
     copyto!(buf_data, d)
     return tensor(BlockSparse(buf_data, bo), inds(T))
 end
+
+"""
+    to_buffer(T::BlockSparseTensor, perm::NTuple{N, Int}, buf::AllocBuffer)
+
+Copy a heap-backed `BlockSparseTensor` into a buffer-allocated one while
+applying dimension permutation `perm` during the copy. The block structure
+is also permuted. One data pass — no intermediate heap tensor.
+"""
+function to_buffer(T::BlockSparseTensor{ElT, N}, perm::NTuple{N, Int},
+                   buf::AllocBuffer) where {ElT, N}
+    bo_perm, inds_perm = NDTensors.permutedims(blockoffsets(T), inds(T), perm)
+    total = nnz(bo_perm, inds_perm)
+    buf_data = Bumper.alloc!(buf, ElT, total)
+    R = tensor(BlockSparse(buf_data, bo_perm), inds_perm)
+    # Copy each block from heap to buffer with permutation
+    for (block, offset) in pairs(blockoffsets(T))
+        coord = Tuple(block)
+        perm_block = Block(ntuple(i -> coord[perm[i]], Val(N)))
+        perm_off = NDTensors.offset(blockoffsets(R), perm_block)
+        src = blockview(T, block => offset)
+        blk_sz = blockdim(T, block)
+        dest = Base.unsafe_wrap(Array{ElT}, pointer(buf_data, perm_off + 1),
+                                blk_sz; own=false)
+        dest_sz = ntuple(i -> size(src, perm[i]), Val(N))
+        permutedims!(reshape(dest, dest_sz), array(src), perm)
+    end
+    return R
+end
