@@ -1,14 +1,15 @@
-# Benchmark: Pre-permute vs no-pre-permute for repeated contraction
-# Uses your real DMRG tensor structure (L*phi) × R with labels (3,-1,4,-2)×(-2,-1,5)
+# Benchmark: pre-permute vs no-pre-permute for repeated L * ψ * R contraction
+# DMRG-style contraction: left environment × wavefunction × right environment
+#
 # Compares:
-#   (a) to_buffer each iteration (re-permutes every time)
-#   (b) to_buffer_permuted once, then contract (zero internal perm)
+#   (a) to_buffer each iteration (re-permutes every time via internal permutedims)
+#   (b) lanczos_permute once, then contract (trivA/trivB = zero internal perm)
 #
 # Usage:
 #   julia -t 4 --project=benchmark benchmark/qn_lanczos_permute_benchmark.jl
 
 using ITensors
-using NDTensors: Bumper, with_alloc_buffer, to_buffer, contract, dense, copy, permutedims
+using NDTensors: Bumper, with_alloc_buffer, to_buffer, copy
 using ITensors: enable_threaded_blocksparse, disable_threaded_blocksparse
 using LinearAlgebra, BenchmarkTools
 
@@ -17,99 +18,103 @@ ITensors.NDTensors.Strided.disable_threads()
 
 const NTHREADS = Threads.nthreads()
 println("="^70)
-println("DMRG Contraction Permute Benchmark")
+println("DMRG Lanczos Permute Benchmark: L * ψ * R")
 println("="^70)
 println("Julia threads:  $NTHREADS")
 println("BLAS threads:   $(BLAS.get_num_threads())")
 
-# Your exact tensor structure from DMRG
-const lqr = Index([QN("Sz",5)=>3, QN("Sz",3)=>8, QN("Sz",1)=>17,
-                   QN("Sz",-1)=>15, QN("Sz",-3)=>7, QN("Sz",-5)=>2], "Link,qr")
-const ll  = Index([QN()=>1, QN("Sz",0)=>6, QN("Sz",2)=>6,
-                   QN("Sz",-2)=>6, QN("Sz",0)=>1], "Link,l=32")
-const s   = Index([QN("Sz",1)=>1, QN("Sz",-1)=>1], "S=1/2,Site,n=2")
-const p1  = Index([QN("Sz",6)=>1, QN("Sz",4)=>5, QN("Sz",2)=>12,
-                   QN("Sz",0)=>16, QN("Sz",-2)=>12,
-                   QN("Sz",-4)=>5, QN("Sz",-6)=>1], "Link,qr")
+# Tensor indices matching DMRG contraction pattern
+const lqr = Index([QN("Sz", 5) => 3, QN("Sz", 3) => 8, QN("Sz", 1) => 17,
+        QN("Sz", -1) => 15, QN("Sz", -3) => 7, QN("Sz", -5) => 2], "Link,qr")
+const ll = Index([QN() => 1, QN("Sz", 0) => 6, QN("Sz", 2) => 6,
+        QN("Sz", -2) => 6, QN("Sz", 0) => 1], "Link,l=32")
+const s = Index([QN("Sz", 1) => 1, QN("Sz", -1) => 1], "S=1/2,Site,n=2")
+const p1 = Index([QN("Sz", 6) => 1, QN("Sz", 4) => 5, QN("Sz", 2) => 12,
+        QN("Sz", 0) => 16, QN("Sz", -2) => 12,
+        QN("Sz", -4) => 5, QN("Sz", -6) => 1], "Link,qr")
 
-const L  = random_itensor(QN("Sz",0), dag(lqr), prime(lqr), ll, dag(s), prime(s))
-const R  = random_itensor(QN("Sz",0), dag(p1), dag(ll), prime(p1))
-
-# LH = L * phi (environment, fixed across Lanczos iterations)
-const LH = L * random_itensor(QN("Sz",0), p1, lqr, s)
-
-const lt = (3, -1, 4, -2)
-const lr = (-2, -1, 5)
-
-LH_nd = NDTensors.tensor(LH)
-R_nd = NDTensors.tensor(R)
+# Left environment L, wavefunction ψ, right environment R
+const L = random_itensor(ll, dag(s), prime(s), dag(lqr), prime(lqr))
+const ψ = random_itensor(p1, lqr, s)
+const R = random_itensor(dag(p1), dag(ll), prime(p1))
 
 println("\nTensor structure:")
-println("  LH (4D):   $(dim(LH)) total dims, $(nnz(LH)) nnz, labels $lt")
-println("  R  (3D):   $(dim(R)) total dims, $(nnz(R)) nnz, labels $lr")
+println("  L (5D): dims=$(dim(L)), nnz=$(nnz(L))")
+println("  ψ (3D): dims=$(dim(ψ)), nnz=$(nnz(ψ))")
+println("  R (3D): dims=$(dim(R)), nnz=$(nnz(R))")
 println()
 
-# Correctness
+# ── Correctness ──
 println("--- Correctness ---")
-C_ref = contract(LH_nd, lt, R_nd, lr)
+C_ref = L * ψ * R
 
-# No-pre-permute: to_buffer each iteration (hits internal permutedims)
+# No-pre-permute: plain to_buffer each time, then contract via *
+println("--- No-pre Contraction ---")
 buf_c = Bumper.SlabBuffer{2^25}()
 C_nopre = with_alloc_buffer(buf_c) do
-    contract(to_buffer(LH_nd, buf_c), lt, to_buffer(R_nd, buf_c), lr)
+    L_b = ITensors.to_buffer(L, buf_c)
+    ψ_b = ITensors.to_buffer(ψ, buf_c)
+    R_b = ITensors.to_buffer(R, buf_c)
+    L_b * ψ_b * R_b
 end
-println("No-pre match: ", isapprox(copy(C_ref), copy(C_nopre); atol=1e-10))
+println("No-pre match: ", isapprox(C_ref, copy(C_nopre); atol=1e-10))
 
-# Pre-permuted once
-# permA = free_first = (1,3,2,4): A's free labels (3,4) come before contracted (-1,-2)
-# permB = (2,1,3): swap B's contracted to match A's order: (-1,-2,5)
-# New labels: A=(1,2,-1,-2), B=(-1,-2,3), R=(1,2,3) → trivA, trivB
+println("--- Pre Contraction ---")
+# Pre-permute: lanczos_permute once, then contract via *
 buf_p = Bumper.SlabBuffer{2^25}()
-LH_p = with_alloc_buffer(buf_p) do
-    to_buffer(LH_nd, (1, 3, 2, 4), buf_p)
-end
-R_p = with_alloc_buffer(buf_p) do
-    to_buffer(R_nd, (2, 1, 3), buf_p)
-end
+L_p, R_p, ψ_p = ITensors.lanczos_permute(L, R, ψ, buf_p)
 C_pre = with_alloc_buffer(buf_p) do
-    contract(LH_p, (1, 2, -1, -2), R_p, (-1, -2, 3), (1, 2, 3))
+    L_p * ψ_p * R_p
 end
-println("Pre-perm match: ", isapprox(copy(C_ref), copy(C_pre); atol=1e-10))
-
+println("Pre-perm match: ", isapprox(C_ref, copy(C_pre); atol=1e-10))
+# break
 # ── Benchmark ──
 println("\n--- Benchmark (10 contraction iterations) ---")
 
-# No-pre: to_buffer + contract each iter (10x)
+# No-pre: to_buffer(L, ψ, R) + L*ψ*R each iteration (fresh buf per iter)
 function bench_no_pre()
-    for iter in 1:10
-        buf = Bumper.SlabBuffer{2^25}()
-        with_alloc_buffer(buf) do
-            contract(to_buffer(LH_nd, buf), lt, to_buffer(R_nd, buf), lr)
+    buf = Bumper.SlabBuffer{2^25}()
+    L_b = ITensors.to_buffer(L, buf)
+    ψ_b = ITensors.to_buffer(ψ, buf)
+    R_b = ITensors.to_buffer(R, buf)
+    @btime begin
+        with_alloc_buffer($buf) do
+            $L_b * $ψ_b * $R_b
         end
     end
     nothing
 end
 
 function bench_no_pre_thr()
+    buf = Bumper.SlabBuffer{2^25}()
+    L_b = ITensors.to_buffer(L, buf)
+    ψ_b = ITensors.to_buffer(ψ, buf)
+    R_b = ITensors.to_buffer(R, buf)
     enable_threaded_blocksparse()
-    for iter in 1:10
-        buf = Bumper.SlabBuffer{2^25}()
-        with_alloc_buffer(buf) do
-            contract(to_buffer(LH_nd, buf), lt, to_buffer(R_nd, buf), lr)
+    @btime begin
+        with_alloc_buffer($buf) do
+            $L_b * $ψ_b * $R_b
         end
     end
     disable_threaded_blocksparse()
     nothing
 end
 
-# Pre-perm: permute once, then contract 10x
+# Pre-permute: lanczos_permute once, then L*ψ*R 10x
 function bench_pre()
     buf = Bumper.SlabBuffer{2^25}()
-    LH_p = to_buffer(LH_nd, (1, 3, 2, 4), buf)
-    R_p = to_buffer(R_nd, (2, 1, 3), buf)
-    for iter in 1:10
-        with_alloc_buffer(buf) do
-            contract(LH_p, (1, 2, -1, -2), R_p, (-1, -2, 3), (1, 2, 3))
+    L_p, R_p, ψ_p = ITensors.lanczos_permute(L, R, ψ, buf)
+    a = with_alloc_buffer(buf) do
+        a = noprime!(L_p * ψ_p * R_p)
+    end
+    @btime begin
+        with_alloc_buffer($buf) do
+            $L_p * $ ψ_p * $R_p
+        end
+    end
+    @btime begin
+        with_alloc_buffer($buf) do
+            $L_p * $a * $R_p
         end
     end
     nothing
@@ -117,12 +122,19 @@ end
 
 function bench_pre_thr()
     buf = Bumper.SlabBuffer{2^25}()
-    LH_p = to_buffer(LH_nd, (1, 3, 2, 4), buf)
-    R_p = to_buffer(R_nd, (2, 1, 3), buf)
+    L_p, R_p, ψ_p = ITensors.lanczos_permute(L, R, ψ, buf)
+    a = with_alloc_buffer(buf) do
+        a = noprime!(L_p * ψ_p * R_p)
+    end
     enable_threaded_blocksparse()
-    for iter in 1:10
-        with_alloc_buffer(buf) do
-            contract(LH_p, (1, 2, -1, -2), R_p, (-1, -2, 3), (1, 2, 3))
+    @btime begin
+        with_alloc_buffer($buf) do
+            $L_p * $ψ_p * $R_p
+        end
+    end
+    @btime begin
+        with_alloc_buffer($buf) do
+            $L_p * $a * $R_p
         end
     end
     disable_threaded_blocksparse()
@@ -130,15 +142,23 @@ function bench_pre_thr()
 end
 
 # Warm-up
-bench_no_pre(); bench_no_pre_thr()
-bench_pre(); bench_pre_thr()
+# bench_no_pre()
+# bench_no_pre_thr()
+# bench_pre()
+# bench_pre_thr()
 
 println("(each runs 10 contraction iterations, ~5 sec measurement)")
 println()
 
-for (name, fn) in [("No pre-perm seq", bench_no_pre), ("No pre-perm thr", bench_no_pre_thr),
-                   ("Pre-permute seq", bench_pre), ("Pre-permute thr", bench_pre_thr)]
+for (name, fn) in [
+    ("No pre-perm seq", bench_no_pre),
+    ("No pre-perm thr", bench_no_pre_thr),
+    ("Pre-permute seq", bench_pre),
+    ("Pre-permute thr", bench_pre_thr),
+]
     println("Benchmark: $name")
-    b = @benchmark $fn() seconds=5
-    show(stdout, "text/plain", b); println(); println()
+    b = fn()
+    # show(stdout, "text/plain", b/10)
+    println()
+    println()
 end

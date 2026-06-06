@@ -16,51 +16,84 @@ function to_buffer(A::ITensor, buf::NDTensors.AllocBuffer)
 end
 
 """
+    _predict_output_order(LH, ψ, R)
+
+Predict the output index order of `noprime!(LH * ψ * R)` using only Index
+metadata — no data movement or contraction. This follows the same ordering
+rule as `contract_labels` → `contract_inds`: T1's free indices (in T1's
+order), then T2's free indices (in T2's order), stripped of prime levels.
+
+Returns a tuple of Index objects matching what `inds(noprime!(LH*ψ*R))`
+would produce.
+"""
+function _predict_output_order(LH::ITensor, ψ::ITensor, R::ITensor)
+    LH_inds = Tuple(inds(LH))
+    ψ_inds = Tuple(inds(ψ))
+    R_inds = Tuple(inds(R))
+
+    # Step 1: LH*ψ output = LH_free (LH order) ++ ψ_free (ψ order)
+    LH_free = [i for i in LH_inds if !(i in ψ_inds)]
+    ψ_free  = [i for i in ψ_inds  if !(i in LH_inds)]
+    Lψ_inds = (LH_free..., ψ_free...)
+
+    # Step 2: (Lψ)*R output = Lψ_free (Lψ order) ++ R_free (R order)
+    Lψ_free = [i for i in Lψ_inds if !(i in R_inds)]
+    R_free  = [i for i in R_inds  if !(i in Lψ_inds)]
+    result  = (Lψ_free..., R_free...)
+
+    # Step 3: Strip primes to match ψ's prime level (noprime! equivalent)
+    return noprime(result)
+end
+
+"""
     lanczos_permute(LH, R, ψ, buf)
 
-Copy LH, R, ψ from heap into buffer, with LH and R pre-permuted into
-GEMM-friendly layout so that subsequent `LH * ψ * R` contractions go
-through the zero-copy path (trivA, trivB).
+Copy LH, R, ψ from heap into buffer, with ψ pre-permuted to match the output
+order of `noprime!(LH*ψ*R)`, and LH/R pre-permuted into GEMM-friendly layout
+relative to the new ψ order. This ensures every iteration's `Hv = noprime!(LH*ψ*R)`
+naturally has the same storage order as ψ, so L/R's pre-permutation stays valid
+(LH: free_first, R: cont_first).
 
-LH gets `free_first` order: (LH_unique..., LH_contracted...).
-R gets `cont_first` order: (R_contracted..., R_free...).
-
-Returns (LH_b, R_b, ψ_b) — all buffer-backed. LH_b and R_b should be
-kept across Lanczos iterations; only ψ_b needs replacing each iteration.
-Use Bumper.checkpoint_save/restore to manage the buffer region after LH,R.
+Returns (LH_b, R_b, ψ_b).
 """
 function lanczos_permute(LH::ITensor, R::ITensor, ψ::ITensor,
                          buf::NDTensors.AllocBuffer)
-    # ── LH: free_first order, contracted in ψ's order ──
+    # ── Step 1: Align ψ to target order and copy to buffer ──
+    target = _predict_output_order(LH, ψ, R)
+    ψ_aligned = if Tuple(inds(ψ)) == target
+        to_buffer(ψ, buf)
+    else
+        psi_new = NDTensors.with_alloc_buffer(buf) do
+            permute(ψ, target...)
+        end
+        psi_new
+    end
+
+    # ── Step 2: LH: free_first order, contracted in ψ_aligned's order ──
     LH_inds = Tuple(inds(LH))
-    ψ_inds = Tuple(inds(ψ))
+    ψ_inds = Tuple(inds(ψ_aligned))
     LH_free = filter(i -> !(i in ψ_inds), LH_inds)
-    # Contracted in ψ's index order so contA == contB (avoids alignment rewrite)
     LH_cont = [LH_inds[findfirst(==(ci), LH_inds)] for ci in ψ_inds if ci in LH_inds]
     LH_target = (LH_free..., LH_cont...)
-    # Perm: target→source (standard permutedims convention: new[i] = old[perm[i]])
     LH_perm = ntuple(length(LH_target)) do i
         findfirst(==(LH_target[i]), LH_inds)
     end
 
-    # ── R: cont_first order, contracted in T's (int_inds) order ──
+    # ── Step 3: R: cont_first order, contracted in int_inds order ──
     ψ_unique = filter(i -> !(i in LH_inds), ψ_inds)
     int_inds = (LH_free..., ψ_unique...)
     R_inds = Tuple(inds(R))
-    # Contracted in int_inds order for contA/contB alignment with T
     R_cont_parts = [R_inds[findfirst(==(ci), R_inds)] for ci in int_inds if ci in R_inds]
     R_cont = (R_cont_parts...,)
     R_free = filter(i -> !(i in int_inds), R_inds)
     R_target = (R_cont..., R_free...)
-    # Perm: target→source (standard permutedims convention)
     R_perm = ntuple(length(R_target)) do i
         findfirst(==(R_target[i]), R_inds)
     end
 
-    # ── Apply buffer copy (with perm for BlockSparse, plain for Dense) ──
+    # ── Step 4: Copy LH, R to buffer with perm ──
     LH_nd = tensor(LH)
     R_nd = tensor(R)
-    ψ_nd = tensor(ψ)
     LH_b = if NDTensors.storagetype(LH_nd) <: NDTensors.BlockSparse
         NDTensors.to_buffer(LH_nd, LH_perm, buf)
     else
@@ -71,8 +104,7 @@ function lanczos_permute(LH::ITensor, R::ITensor, ψ::ITensor,
     else
         NDTensors.to_buffer(R_nd, buf)
     end
-    ψ_b = NDTensors.to_buffer(ψ_nd, buf)
     return ITensor(NDTensors.AllowAlias(), LH_b),
            ITensor(NDTensors.AllowAlias(), R_b),
-           ITensor(NDTensors.AllowAlias(), ψ_b)
+           ψ_aligned
 end
