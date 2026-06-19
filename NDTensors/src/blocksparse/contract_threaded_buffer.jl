@@ -300,6 +300,7 @@ function _contract_fallback!(R, labelsR, tensor1, labelstensor1,
                 sizeof(ElR) * prod(ntuple(i -> size(R_block_perm, i), Val(nRlabels))))
             R_scratch = Base.unsafe_wrap(Array{ElR}, Ptr{ElR}(R_ptr),
                 prod(ntuple(i -> size(R_block_perm, i), Val(nRlabels))); own=false)
+            fill!(R_scratch, zero(ElR))
         end
 
         βflag = true

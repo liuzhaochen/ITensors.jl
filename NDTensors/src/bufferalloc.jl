@@ -93,7 +93,9 @@ function generic_zeros(
     if buf === nothing
         error(_NO_BUFFER_MSG)
     end
-    return Bumper.alloc!(buf, T, dims)
+    data = Bumper.alloc!(buf, T, dims)
+    fill!(data, zero(T))
+    return data
 end
 
 # Fix promote_type for UnsafeArray: promote to Vector or UnsafeArray,
